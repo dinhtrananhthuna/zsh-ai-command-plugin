@@ -75,32 +75,54 @@ IMPORTANT GUIDELINES:
 - If multiple commands are needed, separate them with newlines
 - Be concise and accurate for Fedora Linux environment"
     
-    local json_payload=$(cat <<EOF
-{
-    "model": "$ZSH_AI_COMMAND_MODEL",
-    "messages": [
-        {
-            "role": "system",
-            "content": "$system_prompt"
-        },
-        {
-            "role": "user",
-            "content": "$query"
-        }
-    ],
-    "max_tokens": $ZSH_AI_COMMAND_MAX_TOKENS,
-    "temperature": $ZSH_AI_COMMAND_TEMPERATURE
-}
-EOF
-)
+    # Create JSON payload using jq for proper escaping
+    local json_payload=$(jq -n \
+        --arg model "$ZSH_AI_COMMAND_MODEL" \
+        --arg system_content "$system_prompt" \
+        --arg user_content "$query" \
+        --argjson max_tokens "$ZSH_AI_COMMAND_MAX_TOKENS" \
+        --argjson temperature "$ZSH_AI_COMMAND_TEMPERATURE" \
+        '{
+            "model": $model,
+            "messages": [
+                {
+                    "role": "system",
+                    "content": $system_content
+                },
+                {
+                    "role": "user",
+                    "content": $user_content
+                }
+            ],
+            "max_tokens": $max_tokens,
+            "temperature": $temperature
+        }')
     
-    local response=$(curl -s -H "Content-Type: application/json" \
+    # Debug mode - show request details if enabled
+    if [[ -n "$ZSH_AI_COMMAND_DEBUG" ]]; then
+        echo "${fg[blue]}DEBUG: API Request Details:${reset_color}"
+        echo "URL: $ZSH_AI_COMMAND_API_BASE_URL/chat/completions"
+        echo "Model: $ZSH_AI_COMMAND_MODEL"
+        echo "Query: $query"
+        echo "${fg[blue]}DEBUG: JSON Payload:${reset_color}"
+        echo "$json_payload" | jq . 2>/dev/null || echo "$json_payload"
+        echo
+    fi
+    
+    local response=$(curl -s --max-time 30 -H "Content-Type: application/json" \
                           -H "Authorization: Bearer $ZSH_AI_COMMAND_API_KEY" \
                           -d "$json_payload" \
                           "$ZSH_AI_COMMAND_API_BASE_URL/chat/completions")
     
-    if [[ $? -ne 0 ]]; then
-        echo "${fg[red]}Error: Failed to connect to API${reset_color}"
+    local curl_exit_code=$?
+    if [[ $curl_exit_code -ne 0 ]]; then
+        echo "${fg[red]}Error: Failed to connect to API (curl exit code: $curl_exit_code)${reset_color}"
+        return 1
+    fi
+    
+    # Check if response is empty
+    if [[ -z "$response" ]]; then
+        echo "${fg[red]}Error: Empty response from API${reset_color}"
         return 1
     fi
     
@@ -111,11 +133,40 @@ EOF
         return 1
     fi
     
-    # Extract the command from the response
-    local command=$(echo "$response" | jq -r '.choices[0].message.content' 2>/dev/null | sed 's/^```[a-z]*//g' | sed 's/```$//g' | sed '/^$/d')
+    # Debug mode - show raw response if enabled
+    if [[ -n "$ZSH_AI_COMMAND_DEBUG" ]]; then
+        echo "${fg[blue]}DEBUG: Raw API Response:${reset_color}"
+        echo "$response" | jq . 2>/dev/null || echo "$response"
+        echo "${fg[blue]}DEBUG: End of response${reset_color}"
+        echo
+    fi
+    
+    # Extract the command from the response - be more robust with parsing
+    local command=""
+    if echo "$response" | jq -e '.choices[0].message.content' >/dev/null 2>&1; then
+        command=$(echo "$response" | jq -r '.choices[0].message.content' 2>/dev/null)
+        
+        # Clean up the command - remove code blocks and trim whitespace
+        if [[ -n "$command" && "$command" != "null" ]]; then
+            # Remove markdown code blocks if present
+            command=$(echo "$command" | sed 's/^```[a-z]*\s*//g' | sed 's/```$//g')
+            # Remove leading/trailing whitespace but preserve internal structure
+            command=$(echo "$command" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+        fi
+    fi
+    
+    # Debug the extracted command
+    if [[ -n "$ZSH_AI_COMMAND_DEBUG" ]]; then
+        echo "${fg[blue]}DEBUG: Extracted command: '$command'${reset_color}"
+        echo
+    fi
     
     if [[ -z "$command" || "$command" == "null" ]]; then
         echo "${fg[red]}Error: No valid response from API${reset_color}"
+        if [[ -z "$ZSH_AI_COMMAND_DEBUG" ]]; then
+            echo "${fg[yellow]}Tip: Enable debug mode to see the raw response:${reset_color}"
+            echo "${fg[cyan]}export ZSH_AI_COMMAND_DEBUG=1${reset_color}"
+        fi
         return 1
     fi
     
