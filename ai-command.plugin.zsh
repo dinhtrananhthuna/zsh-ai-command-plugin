@@ -602,20 +602,25 @@ _ai_command_display_suggestions() {
                         # Highlighted selection with detailed view
                         echo "${fg[yellow]}┌─[OPTION $i - SELECTED]─${reset_color}"
                         echo "${fg[yellow]}│${reset_color} ${risk_color}>${reset_color} ${fg[bold]}${fg[white]}$command${reset_color}"
+                        # Always show basic info for selected item
+                        echo "${fg[yellow]}│${reset_color} ${fg[bold]}Hint:${reset_color} $description"
+                        echo "${fg[yellow]}│${reset_color} ${risk_color}${fg[bold]}Risk:${reset_color} $risk_level${reset_color}"
                         if [[ "$show_details" == "true" ]]; then
-                            echo "${fg[yellow]}│${reset_color} ${fg[bold]}Purpose:${reset_color} $description"
+                            # Extended details when 'd' is pressed
                             echo "${fg[yellow]}│${reset_color} ${fg[bold]}Category:${reset_color} $category_display"
-                            echo "${fg[yellow]}│${reset_color} ${risk_color}${fg[bold]}Risk:${reset_color} $risk_level${reset_color}"
                             if [[ -n "$warning" && "$warning" != "" ]]; then
                                 echo "${fg[yellow]}│${reset_color} ${fg[red]}$warning${reset_color}"
                             fi
                         fi
                         echo "${fg[yellow]}└${reset_color}"
                     else
-                        # Regular option display
+                        # Regular option display - show command with basic info
                         echo "${fg[cyan]}  $i)${reset_color} ${risk_color}>${reset_color} ${fg[cyan]}$command${reset_color}"
+                        # Always show hint as a brief description
+                        echo "     ${fg[white]}${description}${reset_color}"
                         if [[ "$show_details" == "true" ]]; then
-                            echo "     Description: $description"
+                            # Extended details when 'd' is pressed
+                            echo "     Category: $category_display | Risk: ${risk_color}$risk_level${reset_color}"
                         fi
                     fi
                     echo ""
@@ -623,7 +628,7 @@ _ai_command_display_suggestions() {
                 
                 # Control instructions
                 echo "${fg[green]}└─[CONTROLS]─────────────────────────────────${reset_color}"
-                echo "${fg[magenta]}Navigation:${reset_color} ${fg[yellow]}↑/↓${reset_color} Select │ ${fg[green]}[Enter]${reset_color} Execute │ ${fg[blue]}[e]${reset_color} Edit │ ${fg[yellow]}[d]${reset_color} Details"
+                echo "${fg[magenta]}Navigation:${reset_color} ${fg[yellow]}↑/↓${reset_color} Select │ ${fg[green]}[Enter]${reset_color} Execute │ ${fg[blue]}[e]${reset_color} Edit │ ${fg[yellow]}[d]${reset_color} More Details"
                 echo "${fg[magenta]}Quick Select:${reset_color} ${fg[yellow]}[1-9]${reset_color} Direct number │ ${fg[red]}[Ctrl+C]${reset_color} Cancel"
                 
                 # Read single character input
