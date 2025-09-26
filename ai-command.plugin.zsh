@@ -6,7 +6,7 @@
 # Default configuration
 export ZSH_AI_COMMAND_API_BASE_URL="${ZSH_AI_COMMAND_API_BASE_URL:-https://api.openai.com/v1}"
 export ZSH_AI_COMMAND_MODEL="${ZSH_AI_COMMAND_MODEL:-gpt-3.5-turbo}"
-export ZSH_AI_COMMAND_MAX_TOKENS="${ZSH_AI_COMMAND_MAX_TOKENS:-300}"
+export ZSH_AI_COMMAND_MAX_TOKENS="${ZSH_AI_COMMAND_MAX_TOKENS:-500}"
 export ZSH_AI_COMMAND_TEMPERATURE="${ZSH_AI_COMMAND_TEMPERATURE:-0.3}"
 
 # Colors for output
@@ -192,12 +192,19 @@ IMPORTANT GUIDELINES:
 - Provide complete, executable commands that handle complex scenarios properly"
     fi
     
+    # Adjust max_tokens based on mode - enhanced mode needs more tokens for multiple options
+    local adjusted_max_tokens="$ZSH_AI_COMMAND_MAX_TOKENS"
+    if [[ "$with_descriptions" == "true" ]]; then
+        # Enhanced mode - increase tokens for multiple options with descriptions
+        adjusted_max_tokens=$((ZSH_AI_COMMAND_MAX_TOKENS * 2))
+    fi
+    
     # Create JSON payload using jq for proper escaping
     local json_payload=$(jq -n \
         --arg model "$ZSH_AI_COMMAND_MODEL" \
         --arg system_content "$system_prompt" \
         --arg user_content "$query" \
-        --argjson max_tokens "$ZSH_AI_COMMAND_MAX_TOKENS" \
+        --argjson max_tokens "$adjusted_max_tokens" \
         --argjson temperature "$ZSH_AI_COMMAND_TEMPERATURE" \
         '{
             "model": $model,
