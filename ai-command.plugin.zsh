@@ -140,22 +140,38 @@ _ai_command_call_api() {
 
 SYSTEM INFO: $system_info
 
-IMPORTANT GUIDELINES FOR ENHANCED OUTPUT:
-- Provide multiple command options when applicable (different approaches/levels of complexity)
-- Format each option as: COMMAND|||DESCRIPTION
-- The DESCRIPTION should be a brief, clear explanation of what the command does and when to use it
+IMPORTANT: You MUST respond with ONLY a valid JSON object in the following exact format:
+
+{
+  \"commands\": [
+    {
+      \"command\": \"actual_command_here\",
+      \"description\": \"Brief explanation of what this command does\",
+      \"risk_level\": \"SAFE|CAUTION|DANGEROUS\",
+      \"category\": \"FILES|PROCESS|NETWORK|DISK|SERVICE|PACKAGE|SYSTEM|VCS|CONTAINER|SEARCH\"
+    }
+  ],
+  \"notes\": \"Optional additional safety notes or warnings\"
+}
+
+CRITICAL: Ensure all JSON strings are properly escaped:
+- Use \\\\; instead of \\; in commands
+- Use \\\\\\\\ for literal backslashes
+- Escape quotes as \\\"
+- The JSON must be valid and parseable
+
+GUIDELINES:
+- Provide multiple command options when applicable (different approaches/complexity levels)
 - Use Fedora-specific commands: dnf (not apt/yum), systemctl, firewall-cmd, rpm, etc.
 - Use zsh-compatible syntax and features where beneficial
 - For package management: use 'sudo dnf install', 'sudo dnf remove', 'sudo dnf update'
 - For services: use 'sudo systemctl start/stop/restart/enable/disable'
 - For firewall: use 'sudo firewall-cmd'
 - Be concise and accurate for Fedora Linux environment
-- Provide complete, executable commands that handle complex scenarios properly
-
-EXAMPLE FORMAT:
-sudo systemctl stop docker|||Stop Docker service immediately (recommended for quick stop)
-sudo systemctl disable docker && sudo systemctl stop docker|||Stop Docker service and prevent auto-start on boot (for permanent disable)
-docker stop \$(docker ps -q) && sudo systemctl stop docker|||Stop all running containers first, then stop Docker service (safest option)"
+- Provide complete, executable commands
+- Set risk_level: SAFE (no data loss), CAUTION (system changes), DANGEROUS (data loss risk)
+- Set appropriate category for command type
+- Keep descriptions brief but informative"
     else
         system_prompt="You are a helpful assistant that converts natural language requests into terminal commands for Fedora Linux systems using zsh shell.
 
@@ -347,28 +363,119 @@ _ai_command_display_suggestions() {
     local input_data="$1"
     local suggestions=()
     local descriptions=()
-    local has_descriptions=false
+    local risk_levels=()
+    local categories=()
+    local notes=""
+    local has_json_data=false
     
-    # Check if input contains descriptions (format: COMMAND|||DESCRIPTION)
-    if [[ "$input_data" =~ \|\|\| ]]; then
-        has_descriptions=true
-        # Parse commands and descriptions
-        local IFS=$'\n'
-        local lines=(${(f)input_data})
-        for line in "${lines[@]}"; do
-            if [[ "$line" =~ ^(.*)\|\|\|(.*)$ ]]; then
-                suggestions+=("${match[1]}")
-                descriptions+=("${match[2]}")
-            else
-                suggestions+=("$line")
-                descriptions+=("Auto-generated command")
+    if [[ -n "$ZSH_AI_COMMAND_DEBUG" ]]; then
+        echo "DEBUG: Input data to display function:" >&2
+        echo "$input_data" | head -10 >&2
+        echo "DEBUG: Input data length: ${#input_data}" >&2
+        echo "" >&2
+    fi
+    
+    # First try to parse as JSON format - handle escaped quotes and newlines from API response
+    local clean_json="$input_data"
+    # Unescape JSON quotes and newlines that come from API response
+    # Be more careful with backslashes - only unescape the specific cases we need
+    clean_json=$(echo "$clean_json" | sed 's/\\\"/"/g' | sed 's/\\n/\n/g')
+    
+    if [[ -n "$ZSH_AI_COMMAND_DEBUG" ]]; then
+        echo "DEBUG: Testing JSON parsing..." >&2
+        echo "DEBUG: Clean JSON (first 200 chars): ${clean_json:0:200}..." >&2
+    fi
+    
+    # Try jq parsing with error handling
+    local jq_test_result
+    jq_test_result=$(echo "$clean_json" | jq -e '.commands' 2>&1)
+    local jq_exit_code=$?
+    
+    if [[ -n "$ZSH_AI_COMMAND_DEBUG" ]]; then
+        echo "DEBUG: jq test result: $jq_test_result" >&2
+        echo "DEBUG: jq exit code: $jq_exit_code" >&2
+    fi
+    
+    if [[ $jq_exit_code -eq 0 ]]; then
+        if [[ -n "$ZSH_AI_COMMAND_DEBUG" ]]; then
+            echo "DEBUG: Parsing structured JSON response" >&2
+        fi
+        
+        has_json_data=true
+        local command_count=$(echo "$clean_json" | jq -r '.commands | length')
+        
+        # Extract commands, descriptions, risk levels, and categories from JSON
+        for ((i=0; i<command_count; i++)); do
+            local cmd=$(echo "$clean_json" | jq -r ".commands[$i].command")
+            local desc=$(echo "$clean_json" | jq -r ".commands[$i].description")
+            local risk=$(echo "$clean_json" | jq -r ".commands[$i].risk_level // \"SAFE\"")
+            local cat=$(echo "$clean_json" | jq -r ".commands[$i].category // \"SYSTEM\"")
+            
+            if [[ -n "$cmd" && "$cmd" != "null" ]]; then
+                suggestions+=("$cmd")
+                descriptions+=("$desc")
+                risk_levels+=("$risk")
+                categories+=("$cat")
             fi
         done
-    else
-        # Traditional format - just commands
+        
+        # Extract notes if present
+        notes=$(echo "$clean_json" | jq -r '.notes // ""')
+        
+        if [[ -n "$ZSH_AI_COMMAND_DEBUG" ]]; then
+            echo "DEBUG: JSON parsing found ${#suggestions[@]} commands" >&2
+            for i in {1..${#suggestions[@]}}; do
+                echo "DEBUG: Command $i: '${suggestions[$i]}' | Risk: '${risk_levels[$i]}' | Category: '${categories[$i]}'" >&2
+            done
+        fi
+    fi
+    
+    # Fallback: Legacy ||| format parsing
+    if [[ "$has_json_data" != "true" ]] && [[ "$input_data" =~ \|\|\| ]]; then
+        if [[ -n "$ZSH_AI_COMMAND_DEBUG" ]]; then
+            echo "DEBUG: Falling back to legacy ||| format parsing" >&2
+        fi
+        
+        local IFS=$'\n'
+        local lines=(${(f)input_data})
+        
+        for line in "${lines[@]}"; do
+            if [[ "$line" =~ '^(.*)\|\|\|(.*)$' ]]; then
+                local raw_command="${match[1]}"
+                local description="${match[2]}"
+                
+                # Clean command: remove backticks
+                raw_command=$(echo "$raw_command" | sed -E 's/^[[:space:]]*`//g' | sed -E 's/`[[:space:]]*$//g')
+                raw_command=$(echo "$raw_command" | sed -E 's/^[[:space:]]+//;s/[[:space:]]+$//')
+                
+                # Ignore explanatory text
+                if [[ ! "$raw_command" =~ ^[Nn]ote: ]] && \
+                   [[ ! "$raw_command" =~ ^[Hh]ere\ (are|is) ]] && \
+                   [[ -n "$raw_command" ]]; then
+                    suggestions+=("$raw_command")
+                    descriptions+=("$description")
+                    risk_levels+=("SAFE")  # Default for legacy format
+                    categories+=("SYSTEM") # Default for legacy format
+                fi
+            fi
+        done
+        
+        if [[ ${#suggestions[@]} -gt 0 ]]; then
+            has_json_data=true  # Mark as successful parsing
+        fi
+    fi
+    
+    # Final fallback: Simple line-by-line parsing
+    if [[ "$has_json_data" != "true" ]]; then
+        if [[ -n "$ZSH_AI_COMMAND_DEBUG" ]]; then
+            echo "DEBUG: Using simple line-by-line parsing (legacy fallback)" >&2
+        fi
+        
         suggestions=("${(@f)input_data}")  # Split by newlines
         for cmd in "${suggestions[@]}"; do
             descriptions+=("Command suggestion")
+            risk_levels+=("SAFE")
+            categories+=("SYSTEM")
         done
     fi
     
@@ -378,12 +485,26 @@ _ai_command_display_suggestions() {
         # Single command with enhanced display
         local command="${suggestions[1]}"
         local description="${descriptions[1]}"
-        local analysis=$(_ai_command_analyze_command "$command")
-        local risk_level="${analysis%%|*}"
-        local category_info="${analysis#*|}"; category_info="${category_info%%|*}"
-        local warning="${analysis##*|}"
+        
+        # Use AI-provided data if available, otherwise analyze locally
+        local risk_level="${risk_levels[1]:-SAFE}"
+        local category_info="${categories[1]:-SYSTEM}"
+        if [[ "$risk_level" == "SAFE" && "$category_info" == "SYSTEM" && "$has_json_data" != "true" ]]; then
+            # Only do local analysis if we don't have AI-provided data
+            local analysis=$(_ai_command_analyze_command "$command")
+            risk_level="${analysis%%|*}"
+            category_info="${analysis#*|}"; category_info="${category_info%%|*}"
+        fi
+        
         local risk_color=$(_ai_command_get_risk_color "$risk_level")
         local category_display=$(_ai_command_get_category_display "$category_info")
+        
+        # Generate warning based on risk level
+        local warning=""
+        case "$risk_level" in
+            "DANGEROUS") warning="WARNING: DANGEROUS - Can permanently delete files/data" ;;
+            "CAUTION") warning="WARNING: Requires elevated privileges or affects system" ;;
+        esac
         
         echo "${fg[green]}┌─[AI COMMAND SUGGESTION]─${reset_color}"
         echo "${fg[green]}│${reset_color}"
@@ -433,10 +554,26 @@ _ai_command_display_suggestions() {
             for i in {1..${#suggestions[@]}}; do
                 local command="${suggestions[$i]}"
                 local description="${descriptions[$i]}"
-                local analysis=$(_ai_command_analyze_command "$command")
-                local risk_level="${analysis%%|*}"
-                local category_info="${analysis#*|}"; category_info="${category_info%%|*}"
-                local warning="${analysis##*|}"
+                
+                # Use AI-provided data if available, otherwise analyze locally
+                local risk_level="${risk_levels[$i]:-SAFE}"
+                local category_info="${categories[$i]:-SYSTEM}"
+                local warning=""
+                
+                if [[ "$risk_level" == "SAFE" && "$category_info" == "SYSTEM" && "$has_json_data" != "true" ]]; then
+                    # Only do local analysis if we don't have AI-provided data
+                    local analysis=$(_ai_command_analyze_command "$command")
+                    risk_level="${analysis%%|*}"
+                    category_info="${analysis#*|}"; category_info="${category_info%%|*}"
+                    warning="${analysis##*|}"
+                else
+                    # Generate warning based on AI-provided risk level
+                    case "$risk_level" in
+                        "DANGEROUS") warning="WARNING: DANGEROUS - Can permanently delete files/data" ;;
+                        "CAUTION") warning="WARNING: Requires elevated privileges or affects system" ;;
+                    esac
+                fi
+                
                 local risk_color=$(_ai_command_get_risk_color "$risk_level")
                 local category_display=$(_ai_command_get_category_display "$category_info")
                 
