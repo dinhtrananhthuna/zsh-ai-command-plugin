@@ -155,10 +155,11 @@ IMPORTANT: You MUST respond with ONLY a valid JSON object in the following exact
 }
 
 CRITICAL: Ensure all JSON strings are properly escaped:
-- Use \\\\; instead of \\; in commands
-- Use \\\\\\\\ for literal backslashes
-- Escape quotes as \\\"
-- The JSON must be valid and parseable
+- Use \\\\; instead of \\; in commands (double backslash before semicolon)
+- Use \\\\\\\\ for literal backslashes (four backslashes for one literal backslash)
+- Escape quotes as \\\" (backslash before quote)
+- The JSON must be valid and parseable by jq
+- Test your JSON: if it contains \\; it will break parsing, use \\\\; instead
 
 GUIDELINES:
 - Provide multiple command options when applicable (different approaches/complexity levels)
@@ -282,35 +283,42 @@ IMPORTANT GUIDELINES:
         echo "$response" | jq -e '.choices[0].message.content' >/dev/null 2>&1 && echo "✅ content exists" >&2 || echo "❌ no content" >&2
     fi
     
-    # Extract content using string manipulation (more reliable than JSON parsing with literal newlines)
-    local content_pattern='"content":"'
-    if [[ "$response" == *"$content_pattern"* ]]; then
-        # Find the start of the content value
-        local temp="${response#*$content_pattern}"
-        # Find the end of the content value (look for the closing quote before next field)
-        local content_end_pattern='","reasoning_content"'
-        if [[ "$temp" == *"$content_end_pattern"* ]]; then
-            raw_content="${temp%%$content_end_pattern*}"
-        else
-            # Try alternative end patterns
-            content_end_pattern='","refusal"'
+    # Extract content using jq for proper JSON parsing
+    if echo "$response" | jq -e '.choices[0].message.content' >/dev/null 2>&1; then
+        raw_content=$(echo "$response" | jq -r '.choices[0].message.content' 2>/dev/null)
+        
+        # Remove markdown code blocks if present
+        if [[ "$raw_content" == *"```json"* ]]; then
+            # Extract JSON from markdown code block
+            raw_content=$(echo "$raw_content" | sed 's/^```json$//' | sed 's/^```$//' | sed '/^$/d')
+        elif [[ "$raw_content" == *"```"* ]]; then
+            # Extract content from generic code block
+            raw_content=$(echo "$raw_content" | sed 's/^```$//' | sed '/^$/d')
+        fi
+        
+        command="$raw_content"
+    else
+        # Fallback to string manipulation if jq fails
+        local content_pattern='"content":"'
+        if [[ "$response" == *"$content_pattern"* ]]; then
+            # Find the start of the content value
+            local temp="${response#*$content_pattern}"
+            # Find the end of the content value (look for the closing quote before next field)
+            local content_end_pattern='","reasoning_content"'
             if [[ "$temp" == *"$content_end_pattern"* ]]; then
                 raw_content="${temp%%$content_end_pattern*}"
             else
-                content_end_pattern='","role"'
+                # Try alternative end patterns
+                content_end_pattern='","refusal"'
                 if [[ "$temp" == *"$content_end_pattern"* ]]; then
                     raw_content="${temp%%$content_end_pattern*}"
+                else
+                    content_end_pattern='","role"'
+                    if [[ "$temp" == *"$content_end_pattern"* ]]; then
+                        raw_content="${temp%%$content_end_pattern*}"
+                    fi
                 fi
             fi
-        fi
-        command="$raw_content"
-    fi
-    
-    # If string manipulation didn't work, try jq as fallback (after escaping newlines)
-    if [[ -z "$command" ]]; then
-        local escaped_response=$(echo "$response" | sed 's/\n/\\n/g')
-        if echo "$escaped_response" | jq -e '.choices[0].message.content' >/dev/null 2>&1; then
-            raw_content=$(echo "$escaped_response" | jq -r '.choices[0].message.content' 2>/dev/null)
             command="$raw_content"
         fi
     fi
@@ -382,11 +390,16 @@ _ai_command_display_suggestions() {
         echo "" >&2
     fi
     
-    # First try to parse as JSON format - handle escaped quotes and newlines from API response
+    # First try to parse as JSON format - handle escaped characters from API response
     local clean_json="$input_data"
-    # Unescape JSON quotes and newlines that come from API response
-    # Be more careful with backslashes - only unescape the specific cases we need
-    clean_json=$(echo "$clean_json" | sed 's/\\\"/"/g' | sed 's/\\n/\n/g')
+    # Fix common JSON escape issues that break parsing
+    # The API returns \\; but JSON needs \\\\; for a literal backslash-semicolon
+    # We need to escape the backslash before the semicolon FIRST
+    clean_json=$(echo "$clean_json" | sed 's/\\;/\\\\;/g')
+    # Now unescape JSON characters properly for valid JSON parsing
+    clean_json=$(echo "$clean_json" | sed 's/\\\"/"/g' | sed 's/\\n/\n/g' | sed 's/\\t/\t/g' | sed 's/\\r/\r/g')
+    # Handle backslashes last - convert \\\\ to \\ for proper JSON
+    clean_json=$(echo "$clean_json" | sed 's/\\\\\\\\/\\\\/g')
     
     if [[ -n "$ZSH_AI_COMMAND_DEBUG" ]]; then
         echo "DEBUG: Testing JSON parsing..." >&2
