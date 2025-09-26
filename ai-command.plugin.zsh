@@ -128,15 +128,12 @@ _ai_command_get_risk_color() {
     esac
 }
 
-# Function to make API call to OpenAI with enhanced prompting for command descriptions
+# Function to make API call to OpenAI with structured JSON responses
 _ai_command_call_api() {
     local query="$1"
-    local with_descriptions="${2:-false}"
     local system_info=$(_ai_command_get_system_info)
     
-    local system_prompt
-    if [[ "$with_descriptions" == "true" ]]; then
-        system_prompt="You are a helpful assistant that converts natural language requests into terminal commands for Fedora Linux systems using zsh shell.
+    local system_prompt="You are a helpful assistant that converts natural language requests into terminal commands for Fedora Linux systems using zsh shell.
 
 SYSTEM INFO: $system_info
 
@@ -146,12 +143,11 @@ IMPORTANT: You MUST respond with ONLY a valid JSON object in the following exact
   \"commands\": [
     {
       \"command\": \"actual_command_here\",
-      \"description\": \"Brief explanation of what this command does\",
-      \"risk_level\": \"SAFE|CAUTION|DANGEROUS\",
-      \"category\": \"FILES|PROCESS|NETWORK|DISK|SERVICE|PACKAGE|SYSTEM|VCS|CONTAINER|SEARCH\"
+      \"hint\": \"Brief explanation of what this command does and any important usage notes\",
+      \"category\": \"FILES|PROCESS|NETWORK|DISK|SERVICE|PACKAGE|SYSTEM|VCS|CONTAINER|SEARCH\",
+      \"warning_level\": \"SAFE|CAUTION|DANGEROUS\"
     }
-  ],
-  \"notes\": \"Optional additional safety notes or warnings\"
+  ]
 }
 
 CRITICAL: Ensure all JSON strings are properly escaped:
@@ -170,35 +166,13 @@ GUIDELINES:
 - For firewall: use 'sudo firewall-cmd'
 - Be concise and accurate for Fedora Linux environment
 - Provide complete, executable commands
-- Set risk_level: SAFE (no data loss), CAUTION (system changes), DANGEROUS (data loss risk)
+- Set warning_level: SAFE (read-only operations), CAUTION (system changes/sudo required), DANGEROUS (potential data loss)
 - Set appropriate category for command type
-- Keep descriptions brief but informative"
-    else
-        system_prompt="You are a helpful assistant that converts natural language requests into terminal commands for Fedora Linux systems using zsh shell.
-
-SYSTEM INFO: $system_info
-
-IMPORTANT GUIDELINES:
-- Respond with ONLY the command(s), no explanation or markdown formatting
-- Use Fedora-specific commands: dnf (not apt/yum), systemctl, firewall-cmd, rpm, etc.
-- Use zsh-compatible syntax and features where beneficial
-- For package management: use 'sudo dnf install', 'sudo dnf remove', 'sudo dnf update'
-- For services: use 'sudo systemctl start/stop/restart/enable/disable'
-- For firewall: use 'sudo firewall-cmd'
-- If multiple commands are needed, separate them with newlines
-- Be concise and accurate for Fedora Linux environment
-- For port operations: use 'lsof -ti:PORT | xargs kill -9' to kill processes on specific ports
-- For process management: use 'ps aux | grep PROCESS' to find processes, 'pkill PROCESS' to kill by name
-- For file cleanup: use 'find' with appropriate filters and 'rm' or 'sudo rm' for cleanup tasks
-- Provide complete, executable commands that handle complex scenarios properly"
-    fi
+- Keep hints brief but informative, include important usage warnings
+- Always provide at least one command option, up to 5 for complex requests"
     
-    # Adjust max_tokens based on mode - enhanced mode needs more tokens for multiple options
-    local adjusted_max_tokens="$ZSH_AI_COMMAND_MAX_TOKENS"
-    if [[ "$with_descriptions" == "true" ]]; then
-        # Enhanced mode - increase tokens for multiple options with descriptions
-        adjusted_max_tokens=$((ZSH_AI_COMMAND_MAX_TOKENS * 2))
-    fi
+    # Use higher token count for JSON responses with rich information
+    local adjusted_max_tokens=$((ZSH_AI_COMMAND_MAX_TOKENS * 2))
     
     # Create JSON payload using jq for proper escaping
     local json_payload=$(jq -n \
@@ -381,6 +355,10 @@ _ai_command_clean_json() {
     # Remove null bytes and other problematic control characters
     json_data=$(echo "$json_data" | tr -d '\000-\010\013\014\016-\037')
     
+    # Fix escaped quotes that can cause JSON parsing issues
+    # Convert \" back to " for proper JSON parsing
+    json_data=$(echo "$json_data" | sed 's/\\\"/"/g')
+    
     echo "$json_data"
 }
 
@@ -429,17 +407,17 @@ _ai_command_display_suggestions() {
         has_json_data=true
         local command_count=$(echo "$clean_json" | jq -r '.commands | length')
         
-        # Extract commands, descriptions, risk levels, and categories from JSON
+        # Extract commands, hints, warning levels, and categories from JSON
         for ((i=0; i<command_count; i++)); do
             local cmd=$(echo "$clean_json" | jq -r ".commands[$i].command")
-            local desc=$(echo "$clean_json" | jq -r ".commands[$i].description")
-            local risk=$(echo "$clean_json" | jq -r ".commands[$i].risk_level // \"SAFE\"")
+            local hint=$(echo "$clean_json" | jq -r ".commands[$i].hint")
+            local warning=$(echo "$clean_json" | jq -r ".commands[$i].warning_level // \"SAFE\"")
             local cat=$(echo "$clean_json" | jq -r ".commands[$i].category // \"SYSTEM\"")
             
             if [[ -n "$cmd" && "$cmd" != "null" ]]; then
                 suggestions+=("$cmd")
-                descriptions+=("$desc")
-                risk_levels+=("$risk")
+                descriptions+=("$hint")
+                risk_levels+=("$warning")
                 categories+=("$cat")
             fi
         done
@@ -742,7 +720,7 @@ _ai_command_display_suggestions() {
     fi
 }
 
-# Enhanced AI command function with smart mode detection
+# AI command function with structured JSON responses
 ai_command() {
     # Check dependencies
     if ! _ai_command_check_dependencies; then
@@ -755,79 +733,53 @@ ai_command() {
     fi
     
     local query="$*"
-    local enhanced_mode=false
     
-    # Check for special flags
+    # Check for help flag
     if [[ "$query" =~ ^(--help|-h) ]]; then
-        echo "${fg[green]}┌──────────────────────────────────────────────────┐${reset_color}"
+        echo "${fg[green]}┌───────────────────────────────────────────────┐${reset_color}"
         echo "${fg[green]}│ ${fg[bold]} _    ___    _____ ___  __  __ __  __    _   _  _ ____  ${reset_color}${fg[green]} │${reset_color}"
         echo "${fg[green]}│ ${fg[bold]}/_\  |_ _|  / ____/ _ \\|  \/  |  \/  |  /_\ | \| | |  _ \ ${reset_color}${fg[green]} │${reset_color}"
         echo "${fg[green]}│ ${fg[bold]}//_\\\ | |  | |  | | | | |\/| | |\/| | //_\\| .\` | | |_) |${reset_color}${fg[green]} │${reset_color}"
         echo "${fg[green]}│ ${fg[bold]}/_/ \\_\|_|  |_|  |_| |_|_|  |_|_|  |_|/_/ \\_\_|\\_|\_|____/ ${reset_color}${fg[green]} │${reset_color}"
         echo "${fg[green]}│                                                  │${reset_color}"
-        echo "${fg[green]}├─[USAGE]───────────────────────────────────────────┤${reset_color}"
+        echo "${fg[green]}├─[USAGE]─────────────────────────────────────────┤${reset_color}"
         echo "${fg[green]}│${reset_color} /AI <request>     - Get AI command suggestions    ${fg[green]}│${reset_color}"
-        echo "${fg[green]}│${reset_color} /AI --enhanced    - Get detailed options          ${fg[green]}│${reset_color}"
         echo "${fg[green]}│${reset_color} /AI --help        - Show this help                ${fg[green]}│${reset_color}"
-        echo "${fg[green]}├─[EXAMPLES]───────────────────────────────────────┤${reset_color}"
+        echo "${fg[green]}├─[EXAMPLES]──────────────────────────────────┤${reset_color}"
         echo "${fg[green]}│${reset_color} /AI stop docker service                          ${fg[green]}│${reset_color}"
-        echo "${fg[green]}│${reset_color} /AI --enhanced find large files                  ${fg[green]}│${reset_color}"
+        echo "${fg[green]}│${reset_color} /AI find large files                            ${fg[green]}│${reset_color}"
         echo "${fg[green]}│${reset_color} /AI check processes using port 3000             ${fg[green]}│${reset_color}"
-        echo "${fg[green]}├─[FEATURES]───────────────────────────────────────┤${reset_color}"
-        echo "${fg[green]}│${reset_color} > Risk assessment (SAFE/CAUTION/DANGEROUS)       ${fg[green]}│${reset_color}"
+        echo "${fg[green]}├─[FEATURES]──────────────────────────────────┤${reset_color}"
+        echo "${fg[green]}│${reset_color} > Warning level assessment (SAFE/CAUTION/DANGEROUS) ${fg[green]}│${reset_color}"
         echo "${fg[green]}│${reset_color} > Command categorization with labels             ${fg[green]}│${reset_color}"
-        echo "${fg[green]}│${reset_color} > Detailed explanations for each option          ${fg[green]}│${reset_color}"
+        echo "${fg[green]}│${reset_color} > Detailed hints for each command                ${fg[green]}│${reset_color}"
         echo "${fg[green]}│${reset_color} > Smart navigation (arrows + number keys)        ${fg[green]}│${reset_color}"
         echo "${fg[green]}│${reset_color} > Toggle detailed view with 'd' key              ${fg[green]}│${reset_color}"
-        echo "${fg[green]}└──────────────────────────────────────────────────┘${reset_color}"
+        echo "${fg[green]}└───────────────────────────────────────────────┘${reset_color}"
         return 0
     fi
     
-    # Check for enhanced mode flag
-    if [[ "$query" =~ ^--enhanced ]]; then
-        enhanced_mode=true
-        query="${query#--enhanced}"
-        query="${query#[[:space:]]*}"  # Remove leading whitespace
-    fi
-    
     if [[ -z "$query" ]]; then
-        echo "${fg[red]}┌─[ERROR: NO QUERY PROVIDED]─────────────────────────┐${reset_color}"
+        echo "${fg[red]}┌─[ERROR: NO QUERY PROVIDED]─────────────────────────────────────────────────────┐${reset_color}"
         echo "${fg[red]}│${reset_color} ${fg[yellow]}Usage: /AI <your natural language request>${reset_color}         ${fg[red]}│${reset_color}"
         echo "${fg[red]}│${reset_color} ${fg[cyan]}Tip: Use /AI --help for more options${reset_color}               ${fg[red]}│${reset_color}"
-        echo "${fg[red]}├─[QUICK EXAMPLES]───────────────────────────────┤${reset_color}"
+        echo "${fg[red]}├─[QUICK EXAMPLES]───────────────────────────────────────────┤${reset_color}"
         echo "${fg[red]}│${reset_color} > /AI stop docker service                         ${fg[red]}│${reset_color}"
         echo "${fg[red]}│${reset_color} > /AI find files larger than 100MB                ${fg[red]}│${reset_color}"
-        echo "${fg[red]}│${reset_color} > /AI --enhanced check system memory usage         ${fg[red]}│${reset_color}"
-        echo "${fg[red]}└──────────────────────────────────────────────────┘${reset_color}"
+        echo "${fg[red]}│${reset_color} > /AI check system memory usage                   ${fg[red]}│${reset_color}"
+        echo "${fg[red]}└──────────────────────────────────────────────────────┘${reset_color}"
         return 1
     fi
     
-    # Smart mode detection - use enhanced mode for complex queries
-    if [[ ! "$enhanced_mode" == "true" ]]; then
-        # Auto-enable enhanced mode for complex queries
-        if [[ "$query" =~ (multiple|different|options|ways|alternatives|complex|advanced|best|safest|fastest) ]] || \
-           [[ "$query" =~ (find.*and.*|check.*and.*|stop.*and.*|start.*and.*) ]] || \
-           [[ ${#query} -gt 50 ]]; then
-            enhanced_mode=true
-            echo "${fg[blue]}>>> COMPLEX QUERY DETECTED - ENHANCED MODE ACTIVATED <<<${reset_color}"
-        fi
-    fi
+    echo "${fg[blue]}>>> AI PROCESSING... <<<${reset_color}"
     
-    if [[ "$enhanced_mode" == "true" ]]; then
-        echo "${fg[blue]}>>> AI PROCESSING... (ENHANCED MODE) <<<${reset_color}"
-    else
-        echo "${fg[blue]}>>> AI PROCESSING... <<<${reset_color}"
-    fi
-    
-    local suggestions=$(_ai_command_call_api "$query" "$enhanced_mode")
+    local suggestions=$(_ai_command_call_api "$query")
     
     if [[ $? -eq 0 && -n "$suggestions" ]]; then
         _ai_command_display_suggestions "$suggestions"
     else
         echo "${fg[red]}Failed to get AI suggestions${reset_color}"
-        if [[ "$enhanced_mode" == "true" ]]; then
-            echo "${fg[yellow]}Tip: Try a simpler query without --enhanced flag${reset_color}"
-        fi
+        echo "${fg[yellow]}Tip: Check your API key and network connection${reset_color}"
         return 1
     fi
 }
