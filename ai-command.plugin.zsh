@@ -137,25 +137,25 @@ _ai_command_call_api() {
 
 SYSTEM INFO: $system_info
 
-IMPORTANT: You MUST respond with ONLY a valid JSON object in the following exact format:
+IMPORTANT: You MUST respond using the following simple format. Each command on its own line with this exact pattern:
 
-{
-  \"commands\": [
-    {
-      \"command\": \"actual_command_here\",
-      \"hint\": \"Brief explanation of what this command does and any important usage notes\",
-      \"category\": \"FILES|PROCESS|NETWORK|DISK|SERVICE|PACKAGE|SYSTEM|VCS|CONTAINER|SEARCH\",
-      \"warning_level\": \"SAFE|CAUTION|DANGEROUS\"
-    }
-  ]
-}
+CMD: actual_command_here
+HINT: Brief explanation of what this command does and any important usage notes
+CATEGORY: FILES|PROCESS|NETWORK|DISK|SERVICE|PACKAGE|SYSTEM|VCS|CONTAINER|SEARCH
+RISK: SAFE|CAUTION|DANGEROUS
+---
 
-CRITICAL: Ensure all JSON strings are properly escaped:
-- Use \\\\; instead of \\; in commands (double backslash before semicolon)
-- Use \\\\\\\\ for literal backslashes (four backslashes for one literal backslash)
-- Escape quotes as \\\" (backslash before quote)
-- The JSON must be valid and parseable by jq
-- Test your JSON: if it contains \\; it will break parsing, use \\\\; instead
+Example:
+CMD: sudo dnf update -y
+HINT: Updates all installed packages to the latest versions with auto-confirmation
+CATEGORY: PACKAGE
+RISK: CAUTION
+---
+CMD: dnf check-update
+HINT: Shows available package updates without installing them
+CATEGORY: PACKAGE
+RISK: SAFE
+---
 
 GUIDELINES:
 - Provide multiple command options when applicable (different approaches/complexity levels)
@@ -166,10 +166,11 @@ GUIDELINES:
 - For firewall: use 'sudo firewall-cmd'
 - Be concise and accurate for Fedora Linux environment
 - Provide complete, executable commands
-- Set warning_level: SAFE (read-only operations), CAUTION (system changes/sudo required), DANGEROUS (potential data loss)
-- Set appropriate category for command type
+- Set RISK: SAFE (read-only operations), CAUTION (system changes/sudo required), DANGEROUS (potential data loss)
+- Set appropriate CATEGORY for command type
 - Keep hints brief but informative, include important usage warnings
-- Always provide at least one command option, up to 5 for complex requests"
+- Always provide at least one command option, up to 5 for complex requests
+- End each command block with --- separator"
     
     # Use higher token count for JSON responses with rich information
     local adjusted_max_tokens=$((ZSH_AI_COMMAND_MAX_TOKENS * 2))
@@ -347,19 +348,20 @@ GUIDELINES:
     return 0
 }
 
-# Function to clean JSON by properly escaping control characters
+# Function to clean JSON by fixing common escape issues
 _ai_command_clean_json() {
-    local json_data="$1"
+    local json_input="$1"
+    local result
     
     # Handle actual control characters (ASCII 0-31) by removing problematic ones
-    # Remove null bytes and other problematic control characters
-    json_data=$(echo "$json_data" | tr -d '\000-\010\013\014\016-\037')
+    result=$(printf '%s' "$json_input" | tr -d '\000-\010\013\014\016-\037')
     
-    # Fix escaped quotes that can cause JSON parsing issues
-    # Convert \" back to " for proper JSON parsing
-    json_data=$(echo "$json_data" | sed 's/\\\"/"/g')
+    # Fix invalid JSON escape sequences
+    # \; is not valid JSON - need to escape the backslash to make \\;
+    result=$(printf '%s' "$result" | sed 's/\\;/\\\\\\\\;/g')
+    result=$(printf '%s' "$result" | sed 's/\\|/\\\\\\\\|/g')
     
-    echo "$json_data"
+    printf '%s' "$result"
 }
 
 # Function to display command suggestions with enhanced UI and detailed information
@@ -379,58 +381,71 @@ _ai_command_display_suggestions() {
         echo "" >&2
     fi
     
-    # First try to parse as JSON format - handle escaped characters from API response
-    local clean_json="$input_data"
-    # Apply our JSON cleaning to handle control characters
-    clean_json=$(_ai_command_clean_json "$clean_json")
-    
+    # Parse the new simple format
     if [[ -n "$ZSH_AI_COMMAND_DEBUG" ]]; then
-        echo "DEBUG: Testing JSON parsing..." >&2
-        echo "DEBUG: Clean JSON (first 200 chars): ${clean_json:0:200}..." >&2
+        echo "DEBUG: Parsing simple format response" >&2
+        echo "DEBUG: Input data (first 200 chars): ${input_data:0:200}..." >&2
     fi
     
-    # Try jq parsing with error handling
-    local jq_test_result
-    jq_test_result=$(echo "$clean_json" | jq -e '.commands' 2>&1)
-    local jq_exit_code=$?
+    # Split input by --- separators and parse each block
+    local IFS=$'\n'
+    local blocks=(${(f)input_data})
+    local current_cmd=""
+    local current_hint=""
+    local current_category=""
+    local current_risk=""
+    local in_block=false
     
-    if [[ -n "$ZSH_AI_COMMAND_DEBUG" ]]; then
-        echo "DEBUG: jq test result: $jq_test_result" >&2
-        echo "DEBUG: jq exit code: $jq_exit_code" >&2
-    fi
-    
-    if [[ $jq_exit_code -eq 0 ]]; then
-        if [[ -n "$ZSH_AI_COMMAND_DEBUG" ]]; then
-            echo "DEBUG: Parsing structured JSON response" >&2
-        fi
+    for line in "${blocks[@]}"; do
+        # Skip empty lines
+        [[ -z "$line" ]] && continue
         
-        has_json_data=true
-        local command_count=$(echo "$clean_json" | jq -r '.commands | length')
-        
-        # Extract commands, hints, warning levels, and categories from JSON
-        for ((i=0; i<command_count; i++)); do
-            local cmd=$(echo "$clean_json" | jq -r ".commands[$i].command")
-            local hint=$(echo "$clean_json" | jq -r ".commands[$i].hint")
-            local warning=$(echo "$clean_json" | jq -r ".commands[$i].warning_level // \"SAFE\"")
-            local cat=$(echo "$clean_json" | jq -r ".commands[$i].category // \"SYSTEM\"")
-            
-            if [[ -n "$cmd" && "$cmd" != "null" ]]; then
-                suggestions+=("$cmd")
-                descriptions+=("$hint")
-                risk_levels+=("$warning")
-                categories+=("$cat")
+        # Check for separator
+        if [[ "$line" =~ ^---\s*$ ]]; then
+            # End of block, save if we have a command
+            if [[ -n "$current_cmd" ]]; then
+                suggestions+=("$current_cmd")
+                descriptions+=("${current_hint:-Command suggestion}")
+                categories+=("${current_category:-SYSTEM}")
+                risk_levels+=("${current_risk:-SAFE}")
+                has_json_data=true
             fi
-        done
-        
-        # Extract notes if present
-        notes=$(echo "$clean_json" | jq -r '.notes // ""')
-        
-        if [[ -n "$ZSH_AI_COMMAND_DEBUG" ]]; then
-            echo "DEBUG: JSON parsing found ${#suggestions[@]} commands" >&2
-            for i in {1..${#suggestions[@]}}; do
-                echo "DEBUG: Command $i: '${suggestions[$i]}' | Risk: '${risk_levels[$i]}' | Category: '${categories[$i]}'" >&2
-            done
+            # Reset for next block
+            current_cmd=""
+            current_hint=""
+            current_category=""
+            current_risk=""
+            in_block=false
+            continue
         fi
+        
+        # Parse command fields
+        if [[ "$line" =~ ^CMD:[[:space:]]*(.*) ]]; then
+            current_cmd="${match[1]}"
+            in_block=true
+        elif [[ "$line" =~ ^HINT:[[:space:]]*(.*) ]]; then
+            current_hint="${match[1]}"
+        elif [[ "$line" =~ ^CATEGORY:[[:space:]]*(.*) ]]; then
+            current_category="${match[1]}"
+        elif [[ "$line" =~ ^RISK:[[:space:]]*(.*) ]]; then
+            current_risk="${match[1]}"
+        fi
+    done
+    
+    # Don't forget the last command if there's no final ---
+    if [[ -n "$current_cmd" ]]; then
+        suggestions+=("$current_cmd")
+        descriptions+=("${current_hint:-Command suggestion}")
+        categories+=("${current_category:-SYSTEM}")
+        risk_levels+=("${current_risk:-SAFE}")
+        has_json_data=true
+    fi
+    
+    if [[ -n "$ZSH_AI_COMMAND_DEBUG" ]]; then
+        echo "DEBUG: Simple format parsing found ${#suggestions[@]} commands" >&2
+        for i in {1..${#suggestions[@]}}; do
+            echo "DEBUG: Command $i: '${suggestions[$i]}' | Risk: '${risk_levels[$i]}' | Category: '${categories[$i]}'" >&2
+        done
     fi
     
     # Fallback: Legacy ||| format parsing
