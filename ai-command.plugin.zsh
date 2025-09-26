@@ -57,11 +57,107 @@ _ai_command_get_system_info() {
     echo "System: $distro, Shell: $shell_info"
 }
 
-# Function to make API call to OpenAI
+# Function to analyze command risk and provide categorization
+_ai_command_analyze_command() {
+    local command="$1"
+    local risk_level="SAFE"
+    local category="OTHER"
+    local warning=""
+    
+    # Risk analysis based on command patterns
+    if [[ "$command" =~ (rm -rf|rm -r|rmdir|shred|dd if=.*of=|mkfs|fdisk|parted|wipefs) ]]; then
+        risk_level="DANGEROUS"
+        warning="WARNING: DESTRUCTIVE - Can permanently delete files/data"
+    elif [[ "$command" =~ (sudo|su -|chmod 777|chown|kill -9|pkill|killall|systemctl|firewall-cmd|iptables) ]]; then
+        risk_level="CAUTION"
+        warning="WARNING: Requires elevated privileges or affects system"
+    elif [[ "$command" =~ (find.*-delete|find.*-exec.*rm) ]]; then
+        risk_level="CAUTION"
+        warning="WARNING: Will modify/delete files"
+    fi
+    
+    # Category detection
+    if [[ "$command" =~ (ls|find|grep|cat|less|head|tail|wc|locate) ]]; then
+        category="FILE_SEARCH"
+    elif [[ "$command" =~ (cp|mv|rm|mkdir|chmod|chown|tar|zip|unzip) ]]; then
+        category="FILE_OPS"
+    elif [[ "$command" =~ (ps|top|htop|kill|pkill|jobs|nohup) ]]; then
+        category="PROCESS"
+    elif [[ "$command" =~ (systemctl|service|systemd) ]]; then
+        category="SERVICE"
+    elif [[ "$command" =~ (dnf|rpm|yum|apt|snap|flatpak) ]]; then
+        category="PACKAGE"
+    elif [[ "$command" =~ (netstat|ss|lsof|ping|curl|wget|ssh|scp) ]]; then
+        category="NETWORK"
+    elif [[ "$command" =~ (df|du|mount|umount|lsblk|fdisk) ]]; then
+        category="DISK"
+    elif [[ "$command" =~ (docker|podman|kubectl) ]]; then
+        category="CONTAINER"
+    elif [[ "$command" =~ (git|svn|hg) ]]; then
+        category="VCS"
+    fi
+    
+    echo "${risk_level}|${category}|${warning}"
+}
+
+# Function to get category display
+_ai_command_get_category_display() {
+    local category="$1"
+    case "$category" in
+        "FILE_SEARCH") echo "${fg[cyan]}>>SEARCH<<${reset_color}" ;;
+        "FILE_OPS") echo "${fg[cyan]}>>FILES<<${reset_color}" ;;
+        "PROCESS") echo "${fg[cyan]}>>PROCESS<<${reset_color}" ;;
+        "SERVICE") echo "${fg[cyan]}>>SERVICE<<${reset_color}" ;;
+        "PACKAGE") echo "${fg[cyan]}>>PACKAGE<<${reset_color}" ;;
+        "NETWORK") echo "${fg[cyan]}>>NETWORK<<${reset_color}" ;;
+        "DISK") echo "${fg[cyan]}>>DISK<<${reset_color}" ;;
+        "CONTAINER") echo "${fg[cyan]}>>CONTAINER<<${reset_color}" ;;
+        "VCS") echo "${fg[cyan]}>>VCS<<${reset_color}" ;;
+        *) echo "${fg[cyan]}>>SYSTEM<<${reset_color}" ;;
+    esac
+}
+
+# Function to get risk level color
+_ai_command_get_risk_color() {
+    local risk_level="$1"
+    case "$risk_level" in
+        "SAFE") echo "${fg[green]}" ;;
+        "CAUTION") echo "${fg[yellow]}" ;;
+        "DANGEROUS") echo "${fg[red]}" ;;
+        *) echo "${fg[white]}" ;;
+    esac
+}
+
+# Function to make API call to OpenAI with enhanced prompting for command descriptions
 _ai_command_call_api() {
     local query="$1"
+    local with_descriptions="${2:-false}"
     local system_info=$(_ai_command_get_system_info)
-    local system_prompt="You are a helpful assistant that converts natural language requests into terminal commands for Fedora Linux systems using zsh shell.
+    
+    local system_prompt
+    if [[ "$with_descriptions" == "true" ]]; then
+        system_prompt="You are a helpful assistant that converts natural language requests into terminal commands for Fedora Linux systems using zsh shell.
+
+SYSTEM INFO: $system_info
+
+IMPORTANT GUIDELINES FOR ENHANCED OUTPUT:
+- Provide multiple command options when applicable (different approaches/levels of complexity)
+- Format each option as: COMMAND|||DESCRIPTION
+- The DESCRIPTION should be a brief, clear explanation of what the command does and when to use it
+- Use Fedora-specific commands: dnf (not apt/yum), systemctl, firewall-cmd, rpm, etc.
+- Use zsh-compatible syntax and features where beneficial
+- For package management: use 'sudo dnf install', 'sudo dnf remove', 'sudo dnf update'
+- For services: use 'sudo systemctl start/stop/restart/enable/disable'
+- For firewall: use 'sudo firewall-cmd'
+- Be concise and accurate for Fedora Linux environment
+- Provide complete, executable commands that handle complex scenarios properly
+
+EXAMPLE FORMAT:
+sudo systemctl stop docker|||Stop Docker service immediately (recommended for quick stop)
+sudo systemctl disable docker && sudo systemctl stop docker|||Stop Docker service and prevent auto-start on boot (for permanent disable)
+docker stop \$(docker ps -q) && sudo systemctl stop docker|||Stop all running containers first, then stop Docker service (safest option)"
+    else
+        system_prompt="You are a helpful assistant that converts natural language requests into terminal commands for Fedora Linux systems using zsh shell.
 
 SYSTEM INFO: $system_info
 
@@ -78,6 +174,7 @@ IMPORTANT GUIDELINES:
 - For process management: use 'ps aux | grep PROCESS' to find processes, 'pkill PROCESS' to kill by name
 - For file cleanup: use 'find' with appropriate filters and 'rm' or 'sudo rm' for cleanup tasks
 - Provide complete, executable commands that handle complex scenarios properly"
+    fi
     
     # Create JSON payload using jq for proper escaping
     local json_payload=$(jq -n \
@@ -245,48 +342,131 @@ IMPORTANT GUIDELINES:
     return 0
 }
 
-# Function to display command suggestions with selection
+# Function to display command suggestions with enhanced UI and detailed information
 _ai_command_display_suggestions() {
-    local suggestions=("${(@f)1}")  # Split by newlines
+    local input_data="$1"
+    local suggestions=()
+    local descriptions=()
+    local has_descriptions=false
+    
+    # Check if input contains descriptions (format: COMMAND|||DESCRIPTION)
+    if [[ "$input_data" =~ \|\|\| ]]; then
+        has_descriptions=true
+        # Parse commands and descriptions
+        local IFS=$'\n'
+        local lines=(${(f)input_data})
+        for line in "${lines[@]}"; do
+            if [[ "$line" =~ ^(.*)\|\|\|(.*)$ ]]; then
+                suggestions+=("${match[1]}")
+                descriptions+=("${match[2]}")
+            else
+                suggestions+=("$line")
+                descriptions+=("Auto-generated command")
+            fi
+        done
+    else
+        # Traditional format - just commands
+        suggestions=("${(@f)input_data}")  # Split by newlines
+        for cmd in "${suggestions[@]}"; do
+            descriptions+=("Command suggestion")
+        done
+    fi
+    
     local selected_index=1
     
     if [[ ${#suggestions[@]} -eq 1 ]]; then
-        # Single command, ask for confirmation
-        echo "${fg[green]}AI suggests:${reset_color}"
-        echo "  ${fg[cyan]}${suggestions[1]}${reset_color}"
+        # Single command with enhanced display
+        local command="${suggestions[1]}"
+        local description="${descriptions[1]}"
+        local analysis=$(_ai_command_analyze_command "$command")
+        local risk_level="${analysis%%|*}"
+        local category_info="${analysis#*|}"; category_info="${category_info%%|*}"
+        local warning="${analysis##*|}"
+        local risk_color=$(_ai_command_get_risk_color "$risk_level")
+        local category_display=$(_ai_command_get_category_display "$category_info")
+        
+        echo "${fg[green]}┌─[AI COMMAND SUGGESTION]─${reset_color}"
+        echo "${fg[green]}│${reset_color}"
         echo ""
-        echo "Press ${fg[yellow]}Enter${reset_color} to execute, ${fg[yellow]}Ctrl+C${reset_color} to cancel, or ${fg[yellow]}e${reset_color} to edit:"
+        echo "${fg[magenta]}├─[COMMAND DETAILS]─${reset_color}"
+        echo "${fg[magenta]}│${reset_color}"
+        echo "${fg[magenta]}│${reset_color} ${risk_color}>${reset_color} ${fg[bold]}Command:${reset_color} ${fg[cyan]}$command${reset_color}"
+        echo "${fg[magenta]}│${reset_color} ${fg[bold]}Purpose:${reset_color} $description"
+        echo "${fg[magenta]}│${reset_color} ${fg[bold]}Category:${reset_color} $category_display"
+        echo "${fg[magenta]}│${reset_color} ${risk_color}${fg[bold]}Risk Level:${reset_color} $risk_level${reset_color}"
+        if [[ -n "$warning" && "$warning" != "" ]]; then
+            echo "${fg[magenta]}│${reset_color} ${fg[red]}${warning}${reset_color}"
+        fi
+        echo "${fg[green]}└─[END]───────────────────────────${reset_color}"
+        echo ""
+        echo "${fg[yellow]}Actions:${reset_color} ${fg[green]}[Enter]${reset_color} Execute │ ${fg[blue]}[e]${reset_color} Edit │ ${fg[red]}[Ctrl+C]${reset_color} Cancel"
         
         read -k1 choice
         case $choice in
             $'\n'|$'\r')  # Enter key
                 echo ""
-                eval "${suggestions[1]}"
+                echo "${fg[green]}>>> EXECUTING: ${fg[cyan]}$command${reset_color}"
+                eval "$command"
                 ;;
             'e'|'E')
                 echo ""
-                print -z "${suggestions[1]}"
+                echo "${fg[blue]}>>> EDIT MODE ACTIVATED <<<${reset_color}"
+                print -z "$command"
                 ;;
             *)
                 echo ""
-                echo "${fg[yellow]}Cancelled${reset_color}"
+                echo "${fg[yellow]}>>> OPERATION CANCELLED <<<${reset_color}"
                 ;;
         esac
     else
-        # Multiple commands, show selection menu with arrow key support
+        # Multiple commands with enhanced display
+        local show_details=false
+        
         while true; do
             # Clear screen and show menu
             clear
-            echo "${fg[green]}AI suggests multiple options:${reset_color}"
-            for i in {1..${#suggestions[@]}}; do
-                if [[ $i -eq $selected_index ]]; then
-                    echo "  ${fg[yellow]}► $i) ${suggestions[$i]}${reset_color}"
-                else
-                    echo "    $i) ${fg[cyan]}${suggestions[$i]}${reset_color}"
-                fi
-            done
+            echo "${fg[green]}┌─[AI FOUND ${#suggestions[@]} COMMAND OPTIONS]─${reset_color}"
+            echo "${fg[green]}│${reset_color}"
             echo ""
-            echo "Use ${fg[yellow]}↑↓${reset_color} to navigate, ${fg[yellow]}Enter${reset_color} to execute, ${fg[yellow]}e${reset_color} to edit, ${fg[yellow]}Ctrl+C${reset_color} to cancel:"
+            
+            # Display commands with enhanced information
+            for i in {1..${#suggestions[@]}}; do
+                local command="${suggestions[$i]}"
+                local description="${descriptions[$i]}"
+                local analysis=$(_ai_command_analyze_command "$command")
+                local risk_level="${analysis%%|*}"
+                local category_info="${analysis#*|}"; category_info="${category_info%%|*}"
+                local warning="${analysis##*|}"
+                local risk_color=$(_ai_command_get_risk_color "$risk_level")
+                local category_display=$(_ai_command_get_category_display "$category_info")
+                
+                if [[ $i -eq $selected_index ]]; then
+                    # Highlighted selection with detailed view
+                    echo "${fg[yellow]}┌─[OPTION $i - SELECTED]─${reset_color}"
+                    echo "${fg[yellow]}│${reset_color} ${risk_color}>${reset_color} ${fg[bold]}${fg[white]}$command${reset_color}"
+                    if [[ "$show_details" == "true" ]]; then
+                        echo "${fg[yellow]}│${reset_color} ${fg[bold]}Purpose:${reset_color} $description"
+                        echo "${fg[yellow]}│${reset_color} ${fg[bold]}Category:${reset_color} $category_display"
+                        echo "${fg[yellow]}│${reset_color} ${risk_color}${fg[bold]}Risk:${reset_color} $risk_level${reset_color}"
+                        if [[ -n "$warning" && "$warning" != "" ]]; then
+                            echo "${fg[yellow]}│${reset_color} ${fg[red]}$warning${reset_color}"
+                        fi
+                    fi
+                    echo "${fg[yellow]}└${reset_color}"
+                else
+                    # Regular option display
+                    echo "${fg[cyan]}  $i)${reset_color} ${risk_color}>${reset_color} ${fg[cyan]}$command${reset_color}"
+                    if [[ "$show_details" == "true" ]]; then
+                        echo "     Description: $description"
+                    fi
+                fi
+                echo ""
+            done
+            
+            # Control instructions
+            echo "${fg[green]}└─[CONTROLS]─────────────────────────────────${reset_color}"
+            echo "${fg[magenta]}Navigation:${reset_color} ${fg[yellow]}↑/↓${reset_color} Select │ ${fg[green]}[Enter]${reset_color} Execute │ ${fg[blue]}[e]${reset_color} Edit │ ${fg[yellow]}[d]${reset_color} Details"
+            echo "${fg[magenta]}Quick Select:${reset_color} ${fg[yellow]}[1-9]${reset_color} Direct number │ ${fg[red]}[Ctrl+C]${reset_color} Cancel"
             
             # Read single character input
             read -k1 -s key
@@ -308,27 +488,41 @@ _ai_command_display_suggestions() {
                     esac
                     ;;
                 $'\n'|$'\r')  # Enter key
+                    local selected_command="${suggestions[$selected_index]}"
+                    clear
+                    echo "${fg[green]}>>> EXECUTING OPTION $selected_index <<<${reset_color}"
+                    echo "${fg[cyan]}$selected_command${reset_color}"
                     echo ""
-                    echo "Executing: ${fg[cyan]}${suggestions[$selected_index]}${reset_color}"
-                    eval "${suggestions[$selected_index]}"
+                    eval "$selected_command"
                     break
                     ;;
                 'e'|'E')  # Edit mode
-                    echo ""
+                    clear
+                    echo "${fg[blue]}>>> EDIT MODE: OPTION $selected_index <<<${reset_color}"
                     print -z "${suggestions[$selected_index]}"
                     break
                     ;;
+                'd'|'D')  # Toggle details
+                    if [[ "$show_details" == "true" ]]; then
+                        show_details=false
+                    else
+                        show_details=true
+                    fi
+                    ;;
                 [1-9])  # Number key (1-9)
-                    if [[ $key -ge 1 ]] && [[ $key -le ${#suggestions[@]} ]]; then
+                    if [[ $key -ge 1 ]] && [[ $key -le ${#suggestions[@]} ]] && [[ $key -le 9 ]]; then
+                        local selected_command="${suggestions[$key]}"
+                        clear
+                        echo "${fg[green]}>>> QUICK EXECUTE: OPTION $key <<<${reset_color}"
+                        echo "${fg[cyan]}$selected_command${reset_color}"
                         echo ""
-                        echo "Executing: ${fg[cyan]}${suggestions[$key]}${reset_color}"
-                        eval "${suggestions[$key]}"
+                        eval "$selected_command"
                         break
                     fi
                     ;;
                 $'\x03')  # Ctrl+C
-                    echo ""
-                    echo "${fg[yellow]}Cancelled${reset_color}"
+                    clear
+                    echo "${fg[yellow]}>>> OPERATION CANCELLED - NO COMMAND EXECUTED <<<${reset_color}"
                     break
                     ;;
             esac
@@ -336,7 +530,7 @@ _ai_command_display_suggestions() {
     fi
 }
 
-# Main AI command function
+# Enhanced AI command function with smart mode detection
 ai_command() {
     # Check dependencies
     if ! _ai_command_check_dependencies; then
@@ -349,21 +543,79 @@ ai_command() {
     fi
     
     local query="$*"
+    local enhanced_mode=false
+    
+    # Check for special flags
+    if [[ "$query" =~ ^(--help|-h) ]]; then
+        echo "${fg[green]}┌──────────────────────────────────────────────────┐${reset_color}"
+        echo "${fg[green]}│ ${fg[bold]} _    ___    _____ ___  __  __ __  __    _   _  _ ____  ${reset_color}${fg[green]} │${reset_color}"
+        echo "${fg[green]}│ ${fg[bold]}/_\  |_ _|  / ____/ _ \\|  \/  |  \/  |  /_\ | \| | |  _ \ ${reset_color}${fg[green]} │${reset_color}"
+        echo "${fg[green]}│ ${fg[bold]}//_\\\ | |  | |  | | | | |\/| | |\/| | //_\\| .\` | | |_) |${reset_color}${fg[green]} │${reset_color}"
+        echo "${fg[green]}│ ${fg[bold]}/_/ \\_\|_|  |_|  |_| |_|_|  |_|_|  |_|/_/ \\_\_|\\_|\_|____/ ${reset_color}${fg[green]} │${reset_color}"
+        echo "${fg[green]}│                                                  │${reset_color}"
+        echo "${fg[green]}├─[USAGE]───────────────────────────────────────────┤${reset_color}"
+        echo "${fg[green]}│${reset_color} /AI <request>     - Get AI command suggestions    ${fg[green]}│${reset_color}"
+        echo "${fg[green]}│${reset_color} /AI --enhanced    - Get detailed options          ${fg[green]}│${reset_color}"
+        echo "${fg[green]}│${reset_color} /AI --help        - Show this help                ${fg[green]}│${reset_color}"
+        echo "${fg[green]}├─[EXAMPLES]───────────────────────────────────────┤${reset_color}"
+        echo "${fg[green]}│${reset_color} /AI stop docker service                          ${fg[green]}│${reset_color}"
+        echo "${fg[green]}│${reset_color} /AI --enhanced find large files                  ${fg[green]}│${reset_color}"
+        echo "${fg[green]}│${reset_color} /AI check processes using port 3000             ${fg[green]}│${reset_color}"
+        echo "${fg[green]}├─[FEATURES]───────────────────────────────────────┤${reset_color}"
+        echo "${fg[green]}│${reset_color} > Risk assessment (SAFE/CAUTION/DANGEROUS)       ${fg[green]}│${reset_color}"
+        echo "${fg[green]}│${reset_color} > Command categorization with labels             ${fg[green]}│${reset_color}"
+        echo "${fg[green]}│${reset_color} > Detailed explanations for each option          ${fg[green]}│${reset_color}"
+        echo "${fg[green]}│${reset_color} > Smart navigation (arrows + number keys)        ${fg[green]}│${reset_color}"
+        echo "${fg[green]}│${reset_color} > Toggle detailed view with 'd' key              ${fg[green]}│${reset_color}"
+        echo "${fg[green]}└──────────────────────────────────────────────────┘${reset_color}"
+        return 0
+    fi
+    
+    # Check for enhanced mode flag
+    if [[ "$query" =~ ^--enhanced ]]; then
+        enhanced_mode=true
+        query="${query#--enhanced}"
+        query="${query#[[:space:]]*}"  # Remove leading whitespace
+    fi
     
     if [[ -z "$query" ]]; then
-        echo "${fg[yellow]}Usage: /AI <your natural language request>${reset_color}"
-        echo "Example: /AI please give me command to stop the Docker engine"
+        echo "${fg[red]}┌─[ERROR: NO QUERY PROVIDED]─────────────────────────┐${reset_color}"
+        echo "${fg[red]}│${reset_color} ${fg[yellow]}Usage: /AI <your natural language request>${reset_color}         ${fg[red]}│${reset_color}"
+        echo "${fg[red]}│${reset_color} ${fg[cyan]}Tip: Use /AI --help for more options${reset_color}               ${fg[red]}│${reset_color}"
+        echo "${fg[red]}├─[QUICK EXAMPLES]───────────────────────────────┤${reset_color}"
+        echo "${fg[red]}│${reset_color} > /AI stop docker service                         ${fg[red]}│${reset_color}"
+        echo "${fg[red]}│${reset_color} > /AI find files larger than 100MB                ${fg[red]}│${reset_color}"
+        echo "${fg[red]}│${reset_color} > /AI --enhanced check system memory usage         ${fg[red]}│${reset_color}"
+        echo "${fg[red]}└──────────────────────────────────────────────────┘${reset_color}"
         return 1
     fi
     
-    echo "${fg[blue]}🤖 Thinking...${reset_color}"
+    # Smart mode detection - use enhanced mode for complex queries
+    if [[ ! "$enhanced_mode" == "true" ]]; then
+        # Auto-enable enhanced mode for complex queries
+        if [[ "$query" =~ (multiple|different|options|ways|alternatives|complex|advanced|best|safest|fastest) ]] || \
+           [[ "$query" =~ (find.*and.*|check.*and.*|stop.*and.*|start.*and.*) ]] || \
+           [[ ${#query} -gt 50 ]]; then
+            enhanced_mode=true
+            echo "${fg[blue]}>>> COMPLEX QUERY DETECTED - ENHANCED MODE ACTIVATED <<<${reset_color}"
+        fi
+    fi
     
-    local suggestions=$(_ai_command_call_api "$query")
+    if [[ "$enhanced_mode" == "true" ]]; then
+        echo "${fg[blue]}>>> AI PROCESSING... (ENHANCED MODE) <<<${reset_color}"
+    else
+        echo "${fg[blue]}>>> AI PROCESSING... <<<${reset_color}"
+    fi
+    
+    local suggestions=$(_ai_command_call_api "$query" "$enhanced_mode")
     
     if [[ $? -eq 0 && -n "$suggestions" ]]; then
         _ai_command_display_suggestions "$suggestions"
     else
         echo "${fg[red]}Failed to get AI suggestions${reset_color}"
+        if [[ "$enhanced_mode" == "true" ]]; then
+            echo "${fg[yellow]}Tip: Try a simpler query without --enhanced flag${reset_color}"
+        fi
         return 1
     fi
 }

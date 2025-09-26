@@ -1,13 +1,23 @@
-# AI Command Plugin for Oh My Zsh
+# AI Command Plugin for Oh My Zsh - Enhanced Edition
 
-🤖 Bring AI assistance to your terminal! Convert natural language requests into executable terminal commands using OpenAI's GPT models.
+🤖 **Transform your terminal experience!** Convert natural language requests into executable terminal commands with advanced AI assistance, detailed command explanations, and intelligent safety features.
 
-## Features
+## ✨ Enhanced Features (NEW!)
+
+- 🧠 **Smart Mode Detection**: Automatically detects complex queries and provides enhanced assistance
+- 🛡️ **Risk Assessment**: Visual safety indicators for every command (Safe/Caution/Dangerous)
+- 📝 **Detailed Explanations**: Each command comes with clear descriptions of what it does
+- 🏷️ **Smart Categorization**: Commands organized by type (Files, Network, Process, etc.) with icons
+- 🎯 **Enhanced Navigation**: Arrow keys, number shortcuts, and toggle detailed view
+- 💡 **Multiple Approaches**: Get different ways to accomplish the same task
+- 🔍 **Edit Before Execute**: Always option to modify commands before running
+- 🎨 **Beautiful Interface**: Professional terminal UI with color-coded information
+
+## Core Features
 
 - 🎯 **Natural Language to Commands**: Type `/AI please stop Docker engine` and get the exact command
-- 🔄 **Multiple Suggestions**: Get several command options when available
+- 🔄 **Multiple Suggestions**: Get several command options when available with descriptions
 - ⚡ **Quick Execution**: Press Enter to execute immediately or 'e' to edit first
-- 🎨 **Beautiful Interface**: Colored output with intuitive selection
 - 🔧 **Configurable**: Support for custom OpenAI endpoints, models, and parameters
 - ✅ **Smart Validation**: Dependency checking and error handling
 
@@ -131,44 +141,80 @@ Simply type `/AI` followed by your natural language request:
 
 ```bash
 /AI please stop the Docker engine
+# Shows: Safe/Caution/Dangerous indicator + clear explanation
 ```
 
 ```bash
 /AI how to find files larger than 100MB
+# Auto-detects and provides multiple search approaches with descriptions
 ```
 
 ```bash
-/AI compress this directory into a tar.gz file
+/AI --enhanced find different ways to clean up disk space
+# Explicit enhanced mode with detailed options and safety warnings
 ```
 
-### Interactive Interface
+### Enhanced Mode Options
 
-When you run a command, you'll see:
+- **Regular mode**: `/AI <query>` - Basic command suggestions
+- **Enhanced mode**: `/AI --enhanced <query>` - Multiple detailed options with descriptions
+- **Auto-enhanced**: Complex queries automatically trigger enhanced features
+- **Help**: `/AI --help` - Show all available features and controls
 
-1. **Single command suggestion:**
+### Enhanced Interactive Interface
+
+Experience the new beautiful and informative command interface:
+
+1. **Single Command with Details:**
    ```
-   AI suggests:
-     sudo systemctl stop docker
-
-   Press Enter to execute, Ctrl+C to cancel, or e to edit:
-   ```
-
-2. **Multiple command suggestions:**
-   ```
-   AI suggests multiple options:
-     ► 1) sudo systemctl stop docker
-       2) sudo service docker stop
-       3) docker system prune -a
-
-   Use ↑↓ to navigate, Enter to execute, e to edit, Ctrl+C to cancel:
-   ```
+   🤖 AI Suggestion:
    
-   **Navigation:**
-   - Use **↑↓ arrow keys** to move between options
-   - Press **Enter** to execute the highlighted option
-   - Press **e** to edit the highlighted option
-   - Press **1-9** to directly select by number
-   - Press **Ctrl+C** to cancel
+   ┌─ Command Details
+   │
+   │ 🟡 Command: sudo systemctl stop docker
+   │ 📝 Purpose: Stop Docker service immediately
+   │ 🏷️  Category: 🔧 Service
+   │ 🛡️  Risk Level: CAUTION
+   │ ⚠ Requires elevated privileges or affects system
+   └
+   
+   Actions: [Enter] Execute │ [e] Edit │ [Ctrl+C] Cancel
+   ```
+
+2. **Multiple Enhanced Options:**
+   ```
+   🤖 AI found 3 command options:
+   
+   ┌─► Option 1 [SELECTED]
+   │ 🟡 sudo systemctl stop docker
+   │ 📝 Purpose: Stop Docker service immediately (recommended for quick stop)
+   │ 🏷️  Category: 🔧 Service
+   │ 🛡️  Risk: CAUTION
+   │ ⚠ Requires elevated privileges or affects system
+   └
+   
+     2) 🟡 sudo systemctl disable docker && sudo systemctl stop docker
+        📝 Stop Docker service and prevent auto-start on boot
+   
+     3) 🟢 docker stop $(docker ps -q) && sudo systemctl stop docker  
+        📝 Stop all running containers first, then stop Docker service (safest)
+   
+   Navigation: ↑↓ Select │ [Enter] Execute │ [e] Edit │ [d] Toggle Details
+   Quick Select: [1-9] Direct number │ [Ctrl+C] Cancel
+   ```
+
+#### Enhanced Navigation Controls
+- **↑↓ Arrow Keys**: Navigate between options with live preview
+- **Enter**: Execute selected command with confirmation
+- **e**: Edit selected command in terminal before execution
+- **d**: Toggle between compact and detailed view
+- **1-9**: Quick select by number with immediate feedback
+- **Ctrl+C**: Cancel safely without executing anything
+
+#### Visual Safety Indicators
+- 🟢 **GREEN**: Safe read-only operations
+- 🟡 **YELLOW**: Caution - system changes or requires sudo
+- 🔴 **RED**: Dangerous - can delete files or cause data loss
 
 ### Options
 
@@ -180,20 +226,41 @@ When you run a command, you'll see:
 
 ## Examples
 
-Here are some example queries and the types of commands they might generate:
+Here are example queries showcasing both basic and enhanced features:
 
-| Query | Expected Command |
-|-------|------------------|
-| `/AI stop docker engine` | `sudo systemctl stop docker` |
-| `/AI find large files` | `find . -type f -size +100M` |
-| `/AI check disk space` | `df -h` |
-| `/AI kill process on port 3000` | `lsof -ti:3000 \| xargs kill -9` |
-| `/AI create a backup of this folder` | `tar -czf backup_$(date +%Y%m%d).tar.gz .` |
-| `/AI show running containers` | `docker ps` |
-| `/AI update system packages` | `sudo dnf update` |
-| `/AI install docker` | `sudo dnf install docker` |
-| `/AI enable docker service` | `sudo systemctl enable --now docker` |
-| `/AI open firewall for ssh` | `sudo firewall-cmd --permanent --add-service=ssh && sudo firewall-cmd --reload` |
+### Basic Commands (Single Suggestion)
+| Query | Expected Command | Risk Level |
+|-------|------------------|------------|
+| `/AI check disk space` | `df -h` | 🟢 Safe |
+| `/AI show running containers` | `docker ps` | 🟢 Safe |
+| `/AI list large files` | `find . -type f -size +100M` | 🟢 Safe |
+
+### Enhanced Commands (Multiple Options with Descriptions)
+| Query | Generated Options | Features Shown |
+|-------|-------------------|----------------|
+| `/AI stop docker engine` | Multiple systemctl approaches | 🟡 Risk indicators, 🔧 Service category |
+| `/AI find different ways to clean disk` | Multiple cleanup strategies | 🔴 Danger warnings, 📁 File operations |
+| `/AI check what's using port 3000 and kill it` | Various process management options | ⚙️ Process category, safety tips |
+| `/AI backup this directory with timestamp` | Different backup methods (tar, rsync, etc.) | 💾 Storage category, best practices |
+
+### Auto-Enhanced Queries (Complex queries trigger enhanced mode automatically)
+- `/AI find files larger than 100MB and delete them safely`
+- `/AI check system memory usage and kill high memory processes`  
+- `/AI update all packages and clean up cache afterwards`
+- `/AI show me different ways to restart network services`
+
+### Enhanced Mode Examples
+```bash
+# Explicit enhanced mode for detailed options
+/AI --enhanced install docker
+# Shows: Multiple installation methods, post-install steps, security notes
+
+/AI --enhanced find and remove temporary files  
+# Shows: Various temp file locations, safety warnings, different cleaning levels
+
+/AI --enhanced check network connectivity issues
+# Shows: Multiple diagnostic approaches, from basic ping to advanced troubleshooting
+```
 
 ## Troubleshooting
 
