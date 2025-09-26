@@ -543,14 +543,137 @@ _ai_command_display_suggestions() {
         # Multiple commands with enhanced display
         local show_details=false
         
-        while true; do
-            # Clear screen and show menu
-            clear
+        # Check if we're in an interactive terminal
+        if [[ -t 0 && -t 1 ]]; then
+            # Interactive mode - show menu with navigation
+            while true; do
+                # Clear screen and show menu
+                clear
+                echo "${fg[green]}┌─[AI FOUND ${#suggestions[@]} COMMAND OPTIONS]─${reset_color}"
+                echo "${fg[green]}│${reset_color}"
+                echo ""
+                
+                # Display commands with enhanced information
+                for i in {1..${#suggestions[@]}}; do
+                    local command="${suggestions[$i]}"
+                    local description="${descriptions[$i]}"
+                    
+                    # Use AI-provided data if available, otherwise analyze locally
+                    local risk_level="${risk_levels[$i]:-SAFE}"
+                    local category_info="${categories[$i]:-SYSTEM}"
+                    local warning=""
+                    
+                    if [[ "$risk_level" == "SAFE" && "$category_info" == "SYSTEM" && "$has_json_data" != "true" ]]; then
+                        # Only do local analysis if we don't have AI-provided data
+                        local analysis=$(_ai_command_analyze_command "$command")
+                        risk_level="${analysis%%|*}"
+                        category_info="${analysis#*|}"; category_info="${category_info%%|*}"
+                        warning="${analysis##*|}"
+                    else
+                        # Generate warning based on AI-provided risk level
+                        case "$risk_level" in
+                            "DANGEROUS") warning="WARNING: DANGEROUS - Can permanently delete files/data" ;;
+                            "CAUTION") warning="WARNING: Requires elevated privileges or affects system" ;;
+                        esac
+                    fi
+                    
+                    local risk_color=$(_ai_command_get_risk_color "$risk_level")
+                    local category_display=$(_ai_command_get_category_display "$category_info")
+                    
+                    if [[ $i -eq $selected_index ]]; then
+                        # Highlighted selection with detailed view
+                        echo "${fg[yellow]}┌─[OPTION $i - SELECTED]─${reset_color}"
+                        echo "${fg[yellow]}│${reset_color} ${risk_color}>${reset_color} ${fg[bold]}${fg[white]}$command${reset_color}"
+                        if [[ "$show_details" == "true" ]]; then
+                            echo "${fg[yellow]}│${reset_color} ${fg[bold]}Purpose:${reset_color} $description"
+                            echo "${fg[yellow]}│${reset_color} ${fg[bold]}Category:${reset_color} $category_display"
+                            echo "${fg[yellow]}│${reset_color} ${risk_color}${fg[bold]}Risk:${reset_color} $risk_level${reset_color}"
+                            if [[ -n "$warning" && "$warning" != "" ]]; then
+                                echo "${fg[yellow]}│${reset_color} ${fg[red]}$warning${reset_color}"
+                            fi
+                        fi
+                        echo "${fg[yellow]}└${reset_color}"
+                    else
+                        # Regular option display
+                        echo "${fg[cyan]}  $i)${reset_color} ${risk_color}>${reset_color} ${fg[cyan]}$command${reset_color}"
+                        if [[ "$show_details" == "true" ]]; then
+                            echo "     Description: $description"
+                        fi
+                    fi
+                    echo ""
+                done
+                
+                # Control instructions
+                echo "${fg[green]}└─[CONTROLS]─────────────────────────────────${reset_color}"
+                echo "${fg[magenta]}Navigation:${reset_color} ${fg[yellow]}↑/↓${reset_color} Select │ ${fg[green]}[Enter]${reset_color} Execute │ ${fg[blue]}[e]${reset_color} Edit │ ${fg[yellow]}[d]${reset_color} Details"
+                echo "${fg[magenta]}Quick Select:${reset_color} ${fg[yellow]}[1-9]${reset_color} Direct number │ ${fg[red]}[Ctrl+C]${reset_color} Cancel"
+                
+                # Read single character input
+                read -k1 -s key
+                
+                case $key in
+                    $'\e')  # Escape sequence (arrow keys start with \e)
+                        read -k2 -s key2
+                        case $key2 in
+                            '[A')  # Up arrow
+                                if [[ $selected_index -gt 1 ]]; then
+                                    ((selected_index--))
+                                fi
+                                ;;
+                            '[B')  # Down arrow
+                                if [[ $selected_index -lt ${#suggestions[@]} ]]; then
+                                    ((selected_index++))
+                                fi
+                                ;;
+                        esac
+                        ;;
+                    $'\n'|$'\r')  # Enter key
+                        local selected_command="${suggestions[$selected_index]}"
+                        clear
+                        echo "${fg[green]}>>> EXECUTING OPTION $selected_index <<<${reset_color}"
+                        echo "${fg[cyan]}$selected_command${reset_color}"
+                        echo ""
+                        eval "$selected_command"
+                        break
+                        ;;
+                    'e'|'E')  # Edit mode
+                        clear
+                        echo "${fg[blue]}>>> EDIT MODE: OPTION $selected_index <<<${reset_color}"
+                        print -z "${suggestions[$selected_index]}"
+                        break
+                        ;;
+                    'd'|'D')  # Toggle details
+                        if [[ "$show_details" == "true" ]]; then
+                            show_details=false
+                        else
+                            show_details=true
+                        fi
+                        ;;
+                    [1-9])  # Number key (1-9)
+                        if [[ $key -ge 1 ]] && [[ $key -le ${#suggestions[@]} ]] && [[ $key -le 9 ]]; then
+                            local selected_command="${suggestions[$key]}"
+                            clear
+                            echo "${fg[green]}>>> QUICK EXECUTE: OPTION $key <<<${reset_color}"
+                            echo "${fg[cyan]}$selected_command${reset_color}"
+                            echo ""
+                            eval "$selected_command"
+                            break
+                        fi
+                        ;;
+                    $'\x03')  # Ctrl+C
+                        clear
+                        echo "${fg[yellow]}>>> OPERATION CANCELLED - NO COMMAND EXECUTED <<<${reset_color}"
+                        break
+                        ;;
+                esac
+            done
+        else
+            # Non-interactive mode - just display options without navigation
             echo "${fg[green]}┌─[AI FOUND ${#suggestions[@]} COMMAND OPTIONS]─${reset_color}"
             echo "${fg[green]}│${reset_color}"
             echo ""
             
-            # Display commands with enhanced information
+            # Display all commands with enhanced information
             for i in {1..${#suggestions[@]}}; do
                 local command="${suggestions[$i]}"
                 local description="${descriptions[$i]}"
@@ -577,93 +700,20 @@ _ai_command_display_suggestions() {
                 local risk_color=$(_ai_command_get_risk_color "$risk_level")
                 local category_display=$(_ai_command_get_category_display "$category_info")
                 
-                if [[ $i -eq $selected_index ]]; then
-                    # Highlighted selection with detailed view
-                    echo "${fg[yellow]}┌─[OPTION $i - SELECTED]─${reset_color}"
-                    echo "${fg[yellow]}│${reset_color} ${risk_color}>${reset_color} ${fg[bold]}${fg[white]}$command${reset_color}"
-                    if [[ "$show_details" == "true" ]]; then
-                        echo "${fg[yellow]}│${reset_color} ${fg[bold]}Purpose:${reset_color} $description"
-                        echo "${fg[yellow]}│${reset_color} ${fg[bold]}Category:${reset_color} $category_display"
-                        echo "${fg[yellow]}│${reset_color} ${risk_color}${fg[bold]}Risk:${reset_color} $risk_level${reset_color}"
-                        if [[ -n "$warning" && "$warning" != "" ]]; then
-                            echo "${fg[yellow]}│${reset_color} ${fg[red]}$warning${reset_color}"
-                        fi
-                    fi
-                    echo "${fg[yellow]}└${reset_color}"
-                else
-                    # Regular option display
-                    echo "${fg[cyan]}  $i)${reset_color} ${risk_color}>${reset_color} ${fg[cyan]}$command${reset_color}"
-                    if [[ "$show_details" == "true" ]]; then
-                        echo "     Description: $description"
-                    fi
+                echo "${fg[cyan]}  $i)${reset_color} ${risk_color}>${reset_color} ${fg[cyan]}$command${reset_color}"
+                echo "     Purpose: $description"
+                echo "     Category: $category_display"
+                echo "     Risk: $risk_level"
+                if [[ -n "$warning" && "$warning" != "" ]]; then
+                    echo "     ${fg[red]}$warning${reset_color}"
                 fi
                 echo ""
             done
             
-            # Control instructions
-            echo "${fg[green]}└─[CONTROLS]─────────────────────────────────${reset_color}"
-            echo "${fg[magenta]}Navigation:${reset_color} ${fg[yellow]}↑/↓${reset_color} Select │ ${fg[green]}[Enter]${reset_color} Execute │ ${fg[blue]}[e]${reset_color} Edit │ ${fg[yellow]}[d]${reset_color} Details"
-            echo "${fg[magenta]}Quick Select:${reset_color} ${fg[yellow]}[1-9]${reset_color} Direct number │ ${fg[red]}[Ctrl+C]${reset_color} Cancel"
-            
-            # Read single character input
-            read -k1 -s key
-            
-            case $key in
-                $'\e')  # Escape sequence (arrow keys start with \e)
-                    read -k2 -s key2
-                    case $key2 in
-                        '[A')  # Up arrow
-                            if [[ $selected_index -gt 1 ]]; then
-                                ((selected_index--))
-                            fi
-                            ;;
-                        '[B')  # Down arrow
-                            if [[ $selected_index -lt ${#suggestions[@]} ]]; then
-                                ((selected_index++))
-                            fi
-                            ;;
-                    esac
-                    ;;
-                $'\n'|$'\r')  # Enter key
-                    local selected_command="${suggestions[$selected_index]}"
-                    clear
-                    echo "${fg[green]}>>> EXECUTING OPTION $selected_index <<<${reset_color}"
-                    echo "${fg[cyan]}$selected_command${reset_color}"
-                    echo ""
-                    eval "$selected_command"
-                    break
-                    ;;
-                'e'|'E')  # Edit mode
-                    clear
-                    echo "${fg[blue]}>>> EDIT MODE: OPTION $selected_index <<<${reset_color}"
-                    print -z "${suggestions[$selected_index]}"
-                    break
-                    ;;
-                'd'|'D')  # Toggle details
-                    if [[ "$show_details" == "true" ]]; then
-                        show_details=false
-                    else
-                        show_details=true
-                    fi
-                    ;;
-                [1-9])  # Number key (1-9)
-                    if [[ $key -ge 1 ]] && [[ $key -le ${#suggestions[@]} ]] && [[ $key -le 9 ]]; then
-                        local selected_command="${suggestions[$key]}"
-                        clear
-                        echo "${fg[green]}>>> QUICK EXECUTE: OPTION $key <<<${reset_color}"
-                        echo "${fg[cyan]}$selected_command${reset_color}"
-                        echo ""
-                        eval "$selected_command"
-                        break
-                    fi
-                    ;;
-                $'\x03')  # Ctrl+C
-                    clear
-                    echo "${fg[yellow]}>>> OPERATION CANCELLED - NO COMMAND EXECUTED <<<${reset_color}"
-                    break
-                    ;;
-            esac
-        done
+            echo "${fg[green]}└─[NON-INTERACTIVE MODE]──────────────────────${reset_color}"
+            echo "${fg[yellow]}To execute a command, use: /AI --execute <option_number>${reset_color}"
+            echo "${fg[yellow]}Or run the command directly from the list above.${reset_color}"
+        fi
     fi
 }
 
