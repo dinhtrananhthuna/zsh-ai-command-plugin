@@ -358,11 +358,9 @@ if [[ -n "$ZSH_VERSION" ]] && command -v compdef >/dev/null 2>&1; then
     compdef _ai_command_completion '/AI'
 fi
 
-# Plugin initialization message
-if [[ -n "$ZSH_AI_COMMAND_API_KEY" ]]; then
-    echo "${fg[green]}✓ AI Command plugin loaded successfully!${reset_color}"
-    echo "  Usage: ${fg[cyan]}/AI <your request>${reset_color}"
-else
-    echo "${fg[yellow]}⚠ AI Command plugin loaded but API key not set${reset_color}"
-    echo "  Set your API key: ${fg[cyan]}export ZSH_AI_COMMAND_API_KEY='your-key'${reset_color}"
+# Plugin initialization - only show messages on errors
+# Silent loading when everything is configured correctly
+if [[ -z "$ZSH_AI_COMMAND_API_KEY" ]]; then
+    echo "${fg[yellow]}⚠ AI Command plugin: API key not set${reset_color}" >&2
+    echo "  Set your API key: ${fg[cyan]}export ZSH_AI_COMMAND_API_KEY='your-key'${reset_color}" >&2
 fi
