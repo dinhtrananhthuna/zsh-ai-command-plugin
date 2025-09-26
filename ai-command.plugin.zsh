@@ -273,28 +273,66 @@ _ai_command_display_suggestions() {
                 ;;
         esac
     else
-        # Multiple commands, show selection menu
-        echo "${fg[green]}AI suggests multiple options:${reset_color}"
-        for i in {1..${#suggestions[@]}}; do
-            if [[ $i -eq $selected_index ]]; then
-                echo "  ${fg[yellow]}► $i) ${suggestions[$i]}${reset_color}"
-            else
-                echo "    $i) ${fg[cyan]}${suggestions[$i]}${reset_color}"
-            fi
+        # Multiple commands, show selection menu with arrow key support
+        while true; do
+            # Clear screen and show menu
+            clear
+            echo "${fg[green]}AI suggests multiple options:${reset_color}"
+            for i in {1..${#suggestions[@]}}; do
+                if [[ $i -eq $selected_index ]]; then
+                    echo "  ${fg[yellow]}► $i) ${suggestions[$i]}${reset_color}"
+                else
+                    echo "    $i) ${fg[cyan]}${suggestions[$i]}${reset_color}"
+                fi
+            done
+            echo ""
+            echo "Use ${fg[yellow]}↑↓${reset_color} to navigate, ${fg[yellow]}Enter${reset_color} to execute, ${fg[yellow]}e${reset_color} to edit, ${fg[yellow]}Ctrl+C${reset_color} to cancel:"
+            
+            # Read single character input
+            read -k1 -s key
+            
+            case $key in
+                $'\e')  # Escape sequence (arrow keys start with \e)
+                    read -k2 -s key2
+                    case $key2 in
+                        '[A')  # Up arrow
+                            if [[ $selected_index -gt 1 ]]; then
+                                ((selected_index--))
+                            fi
+                            ;;
+                        '[B')  # Down arrow
+                            if [[ $selected_index -lt ${#suggestions[@]} ]]; then
+                                ((selected_index++))
+                            fi
+                            ;;
+                    esac
+                    ;;
+                $'\n'|$'\r')  # Enter key
+                    echo ""
+                    echo "Executing: ${fg[cyan]}${suggestions[$selected_index]}${reset_color}"
+                    eval "${suggestions[$selected_index]}"
+                    break
+                    ;;
+                'e'|'E')  # Edit mode
+                    echo ""
+                    print -z "${suggestions[$selected_index]}"
+                    break
+                    ;;
+                [1-9])  # Number key (1-9)
+                    if [[ $key -ge 1 ]] && [[ $key -le ${#suggestions[@]} ]]; then
+                        echo ""
+                        echo "Executing: ${fg[cyan]}${suggestions[$key]}${reset_color}"
+                        eval "${suggestions[$key]}"
+                        break
+                    fi
+                    ;;
+                $'\x03')  # Ctrl+C
+                    echo ""
+                    echo "${fg[yellow]}Cancelled${reset_color}"
+                    break
+                    ;;
+            esac
         done
-        echo ""
-        echo "Use ${fg[yellow]}↑↓${reset_color} to navigate, ${fg[yellow]}Enter${reset_color} to execute, ${fg[yellow]}e${reset_color} to edit, ${fg[yellow]}Ctrl+C${reset_color} to cancel:"
-        
-        # Simple selection (for now, just ask for number)
-        echo "Enter choice (1-${#suggestions[@]}):"
-        read choice
-        
-        if [[ "$choice" =~ ^[0-9]+$ ]] && [[ $choice -ge 1 ]] && [[ $choice -le ${#suggestions[@]} ]]; then
-            echo "Executing: ${fg[cyan]}${suggestions[$choice]}${reset_color}"
-            eval "${suggestions[$choice]}"
-        else
-            echo "${fg[yellow]}Invalid choice or cancelled${reset_color}"
-        fi
     fi
 }
 

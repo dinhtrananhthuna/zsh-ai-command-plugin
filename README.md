@@ -161,15 +161,22 @@ When you run a command, you'll see:
        3) docker system prune -a
 
    Use ↑↓ to navigate, Enter to execute, e to edit, Ctrl+C to cancel:
-   Enter choice (1-3):
    ```
+   
+   **Navigation:**
+   - Use **↑↓ arrow keys** to move between options
+   - Press **Enter** to execute the highlighted option
+   - Press **e** to edit the highlighted option
+   - Press **1-9** to directly select by number
+   - Press **Ctrl+C** to cancel
 
 ### Options
 
 - **Enter**: Execute the command immediately
 - **e**: Edit the command in your terminal before execution
 - **Ctrl+C**: Cancel without executing
-- **Number (1-N)**: Select from multiple options
+- **↑↓ Arrow Keys**: Navigate between multiple options (when available)
+- **Number (1-N)**: Select from multiple options by typing the number
 
 ## Examples
 
