@@ -115,7 +115,7 @@ assert_test "Color functions include reset codes" "echo '$color_output' | grep -
 assert_test "Colors are loaded in zsh" "[[ -n \"\${fg[red]:-}\" ]] || [[ -n \"\${colors[red]:-}\" ]] || echo 'Colors not loaded but that is OK'"
 
 # Test 13: Test alias functionality
-assert_test "AI command alias works" "whence -w /AI | grep -q 'ai_command'"
+assert_test "AI command alias works" "alias /AI | grep -q 'ai_command'"
 
 # Test 14: Test argument parsing
 # This tests the basic structure without making API calls
