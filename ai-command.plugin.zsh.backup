@@ -128,15 +128,12 @@ _ai_command_get_risk_color() {
     esac
 }
 
-# Function to make API call to OpenAI with enhanced prompting for command descriptions
+# Function to make API call to OpenAI with structured JSON response
 _ai_command_call_api() {
     local query="$1"
-    local with_descriptions="${2:-false}"
     local system_info=$(_ai_command_get_system_info)
     
-    local system_prompt
-    if [[ "$with_descriptions" == "true" ]]; then
-        system_prompt="You are a helpful assistant that converts natural language requests into terminal commands for Fedora Linux systems using zsh shell.
+    local system_prompt="You are a helpful assistant that converts natural language requests into terminal commands for Fedora Linux systems using zsh shell.
 
 SYSTEM INFO: $system_info
 
@@ -146,12 +143,11 @@ IMPORTANT: You MUST respond with ONLY a valid JSON object in the following exact
   \"commands\": [
     {
       \"command\": \"actual_command_here\",
-      \"description\": \"Brief explanation of what this command does\",
-      \"risk_level\": \"SAFE|CAUTION|DANGEROUS\",
-      \"category\": \"FILES|PROCESS|NETWORK|DISK|SERVICE|PACKAGE|SYSTEM|VCS|CONTAINER|SEARCH\"
+      \"hint\": \"Brief explanation of what this command does and any important usage notes\",
+      \"category\": \"FILES|PROCESS|NETWORK|DISK|SERVICE|PACKAGE|SYSTEM|VCS|CONTAINER|SEARCH\",
+      \"warning_level\": \"SAFE|CAUTION|DANGEROUS\"
     }
-  ],
-  \"notes\": \"Optional additional safety notes or warnings\"
+  ]
 }
 
 CRITICAL: Ensure all JSON strings are properly escaped:
@@ -170,40 +166,22 @@ GUIDELINES:
 - For firewall: use 'sudo firewall-cmd'
 - Be concise and accurate for Fedora Linux environment
 - Provide complete, executable commands
-- Set risk_level: SAFE (no data loss), CAUTION (system changes), DANGEROUS (data loss risk)
+- Set warning_level: SAFE (read-only operations), CAUTION (system changes/sudo required), DANGEROUS (potential data loss)
 - Set appropriate category for command type
-- Keep descriptions brief but informative"
-    else
-        system_prompt="You are a helpful assistant that converts natural language requests into terminal commands for Fedora Linux systems using zsh shell.
-
-SYSTEM INFO: $system_info
-
-IMPORTANT GUIDELINES:
-- Respond with ONLY the command(s), no explanation or markdown formatting
-- Use Fedora-specific commands: dnf (not apt/yum), systemctl, firewall-cmd, rpm, etc.
-- Use zsh-compatible syntax and features where beneficial
-- For package management: use 'sudo dnf install', 'sudo dnf remove', 'sudo dnf update'
-- For services: use 'sudo systemctl start/stop/restart/enable/disable'
-- For firewall: use 'sudo firewall-cmd'
-- If multiple commands are needed, separate them with newlines
-- Be concise and accurate for Fedora Linux environment
-- For port operations: use 'lsof -ti:PORT | xargs kill -9' to kill processes on specific ports
-- For process management: use 'ps aux | grep PROCESS' to find processes, 'pkill PROCESS' to kill by name
-- For file cleanup: use 'find' with appropriate filters and 'rm' or 'sudo rm' for cleanup tasks
-- Provide complete, executable commands that handle complex scenarios properly"
-    fi
+- Keep hints brief but informative, include important usage warnings
+- Always provide at least one command option, up to 5 for complex requests"
     
-    # Adjust max_tokens based on mode - enhanced mode needs more tokens for multiple options
-    local adjusted_max_tokens="$ZSH_AI_COMMAND_MAX_TOKENS"
-    if [[ "$with_descriptions" == "true" ]]; then
-        # Enhanced mode - increase tokens for multiple options with descriptions
-        adjusted_max_tokens=$((ZSH_AI_COMMAND_MAX_TOKENS * 2))
-    fi
+    # Use higher token count for JSON responses with rich information
+    local adjusted_max_tokens=$((ZSH_AI_COMMAND_MAX_TOKENS * 2))
     
-    # Create JSON payload using jq for proper escaping
-    local json_payload=$(jq -n \
+    # Create JSON payload using jq with proper escaping
+    # First, clean the system prompt to avoid jq parsing issues
+    local clean_system_prompt=$(echo "$system_prompt" | sed 's/\\/\\\\/g' | sed 's/"/\\"/g')
+    
+    local json_payload
+    json_payload=$(jq -n \
         --arg model "$ZSH_AI_COMMAND_MODEL" \
-        --arg system_content "$system_prompt" \
+        --arg system_content "$clean_system_prompt" \
         --arg user_content "$query" \
         --argjson max_tokens "$adjusted_max_tokens" \
         --argjson temperature "$ZSH_AI_COMMAND_TEMPERATURE" \
@@ -221,7 +199,26 @@ IMPORTANT GUIDELINES:
             ],
             "max_tokens": $max_tokens,
             "temperature": $temperature
-        }')
+        }' 2>/dev/null)
+    
+    # If jq fails, fall back to manual JSON construction
+    if [[ -z "$json_payload" ]]; then
+        # Manual JSON construction as fallback
+        local escaped_system_prompt="${clean_system_prompt//"/\"}"
+        local escaped_query="${query//"/\"}"
+        
+        json_payload="{"
+        json_payload+="\"model\":\"$ZSH_AI_COMMAND_MODEL\","
+        json_payload+="\"messages\":["
+        json_payload+="{\"role\":\"system\",\"content\":\"$escaped_system_prompt\"},"
+        json_payload+="{\"role\":\"user\",\"content\":\"$escaped_query\"}"],"
+        json_payload+="\"max_tokens\":$adjusted_max_tokens,"
+        json_payload+="\"temperature\":$ZSH_AI_COMMAND_TEMPERATURE"
+        json_payload+="}"
+    fi
+
+    # Always enable JSON mode for structured responses
+    json_payload=$(echo "$json_payload" | jq '. + {response_format: {type: "json_object"}}')
     
     # Debug mode - show request details if enabled (output to stderr to avoid mixing with command output)
     if [[ -n "$ZSH_AI_COMMAND_DEBUG" ]]; then
@@ -251,10 +248,22 @@ IMPORTANT GUIDELINES:
         return 1
     fi
     
-    # Check for API errors
+    # Check for API errors (OpenAI format)
     local error_message=$(echo "$response" | jq -r '.error.message // empty' 2>/dev/null)
     if [[ -n "$error_message" ]]; then
         echo "${fg[red]}API Error: $error_message${reset_color}" >&2
+        return 1
+    fi
+    
+    # Check for other error formats (like Digital Ocean AI)
+    local status_code=$(echo "$response" | jq -r '.status_code // empty' 2>/dev/null)
+    local message=$(echo "$response" | jq -r '.message // empty' 2>/dev/null)
+    if [[ -n "$status_code" && "$status_code" != "empty" ]] || [[ -n "$message" && "$message" != "empty" ]]; then
+        echo "${fg[red]}API Error (Status: $status_code): $message${reset_color}" >&2
+        if [[ "$message" == *"api key"* ]]; then
+            echo "${fg[yellow]}Please check your API key configuration:${reset_color}" >&2
+            echo "${fg[cyan]}export ZSH_AI_COMMAND_API_KEY='your-valid-api-key'${reset_color}" >&2
+        fi
         return 1
     fi
     
@@ -377,7 +386,13 @@ IMPORTANT GUIDELINES:
 _ai_command_clean_json() {
     local json_data="$1"
     
-    # Handle actual control characters (ASCII 0-31) by removing problematic ones
+    # Replace common control characters that cause jq to fail
+    # Handle newlines, tabs, carriage returns, and other control chars
+    json_data=$(echo "$json_data" | sed 's/\\n/\\\\n/g')  # Escape newlines
+    json_data=$(echo "$json_data" | sed 's/\\t/\\\\t/g')  # Escape tabs
+    json_data=$(echo "$json_data" | sed 's/\\r/\\\\r/g')  # Escape carriage returns
+    
+    # Handle actual control characters (ASCII 0-31) by removing or escaping them
     # Remove null bytes and other problematic control characters
     json_data=$(echo "$json_data" | tr -d '\000-\010\013\014\016-\037')
     
@@ -388,120 +403,90 @@ _ai_command_clean_json() {
 _ai_command_display_suggestions() {
     local input_data="$1"
     local suggestions=()
-    local descriptions=()
-    local risk_levels=()
+    local hints=()
+    local warning_levels=()
     local categories=()
-    local notes=""
     local has_json_data=false
     
     if [[ -n "$ZSH_AI_COMMAND_DEBUG" ]]; then
-        echo "DEBUG: Input data to display function:" >&2
-        echo "$input_data" | head -10 >&2
-        echo "DEBUG: Input data length: ${#input_data}" >&2
-        echo "" >&2
+        echo "DEBUG: Input data to display function:" >/dev/null 2>&1
+        echo "$input_data" | head -10 >/dev/null 2>&1
+        echo "DEBUG: Input data length: ${#input_data}" >/dev/null 2>&1
+        echo "" >/dev/null 2>&1
     fi
     
-    # First try to parse as JSON format - handle escaped characters from API response
+    # Prefer strict JSON mode: try to parse content directly as JSON
     local clean_json="$input_data"
-    # Apply our JSON cleaning to handle control characters
+    local jq_test_result
+    local jq_exit_code
+
+    # If response is a chat completion, extract the content
+    if echo "$clean_json" | jq -e '.choices[0].message.content' >/dev/null 2>&1; then
+        clean_json=$(echo "$clean_json" | jq -r '.choices[0].message.content' 2>/dev/null)
+    fi
+
+    # Clean the JSON to handle control characters before parsing
     clean_json=$(_ai_command_clean_json "$clean_json")
     
     if [[ -n "$ZSH_AI_COMMAND_DEBUG" ]]; then
-        echo "DEBUG: Testing JSON parsing..." >&2
-        echo "DEBUG: Clean JSON (first 200 chars): ${clean_json:0:200}..." >&2
+        echo "DEBUG: Cleaned JSON for parsing:" >&2
+        echo "$clean_json" | head -5 >&2
+        echo "" >&2
     fi
-    
-    # Try jq parsing with error handling
-    local jq_test_result
+
+    # If content is JSON, parse it directly
     jq_test_result=$(echo "$clean_json" | jq -e '.commands' 2>&1)
-    local jq_exit_code=$?
+    jq_exit_code=$?
     
     if [[ -n "$ZSH_AI_COMMAND_DEBUG" ]]; then
-        echo "DEBUG: jq test result: $jq_test_result" >&2
-        echo "DEBUG: jq exit code: $jq_exit_code" >&2
+        echo "DEBUG: jq test result: $jq_test_result" >/dev/null 2>&1
+        echo "DEBUG: jq exit code: $jq_exit_code" >/dev/null 2>&1
     fi
     
     if [[ $jq_exit_code -eq 0 ]]; then
         if [[ -n "$ZSH_AI_COMMAND_DEBUG" ]]; then
-            echo "DEBUG: Parsing structured JSON response" >&2
+            echo "DEBUG: Parsing structured JSON response" >/dev/null 2>&1
         fi
         
         has_json_data=true
         local command_count=$(echo "$clean_json" | jq -r '.commands | length')
         
-        # Extract commands, descriptions, risk levels, and categories from JSON
+        # Extract commands, hints, warning levels, and categories from JSON
         for ((i=0; i<command_count; i++)); do
             local cmd=$(echo "$clean_json" | jq -r ".commands[$i].command")
-            local desc=$(echo "$clean_json" | jq -r ".commands[$i].description")
-            local risk=$(echo "$clean_json" | jq -r ".commands[$i].risk_level // \"SAFE\"")
+            local hint=$(echo "$clean_json" | jq -r ".commands[$i].hint")
+            local warning=$(echo "$clean_json" | jq -r ".commands[$i].warning_level // \"SAFE\"")
             local cat=$(echo "$clean_json" | jq -r ".commands[$i].category // \"SYSTEM\"")
             
             if [[ -n "$cmd" && "$cmd" != "null" ]]; then
                 suggestions+=("$cmd")
-                descriptions+=("$desc")
-                risk_levels+=("$risk")
+                hints+=("$hint")
+                warning_levels+=("$warning")
                 categories+=("$cat")
             fi
         done
         
-        # Extract notes if present
-        notes=$(echo "$clean_json" | jq -r '.notes // ""')
-        
         if [[ -n "$ZSH_AI_COMMAND_DEBUG" ]]; then
-            echo "DEBUG: JSON parsing found ${#suggestions[@]} commands" >&2
+            echo "DEBUG: JSON parsing found ${#suggestions[@]} commands" >/dev/null 2>&1
             for i in {1..${#suggestions[@]}}; do
-                echo "DEBUG: Command $i: '${suggestions[$i]}' | Risk: '${risk_levels[$i]}' | Category: '${categories[$i]}'" >&2
+                echo "DEBUG: Command $i: '${suggestions[$i]}' | Warning: '${warning_levels[$i]}' | Category: '${categories[$i]}'" >/dev/null 2>&1
             done
         fi
-    fi
-    
-    # Fallback: Legacy ||| format parsing
-    if [[ "$has_json_data" != "true" ]] && [[ "$input_data" =~ \|\|\| ]]; then
+    else
+        # If JSON parsing fails, return error since we require JSON responses
+        echo "${fg[red]}Error: Failed to parse JSON response from AI.${reset_color}" >&2
+        echo "${fg[yellow]}The AI response must be in valid JSON format with 'commands' array.${reset_color}" >&2
+        
         if [[ -n "$ZSH_AI_COMMAND_DEBUG" ]]; then
-            echo "DEBUG: Falling back to legacy ||| format parsing" >&2
+            echo "" >&2
+            echo "DEBUG: jq parsing error: $jq_test_result" >&2
+            echo "DEBUG: Raw response that failed JSON parsing:" >&2
+            echo "$clean_json" | head -10 >&2
+            echo "DEBUG: Response length: ${#clean_json} characters" >&2
+        else
+            echo "${fg[cyan]}Tip: Enable debug mode to see the raw response: export ZSH_AI_COMMAND_DEBUG=1${reset_color}" >&2
         fi
-        
-        local IFS=$'\n'
-        local lines=(${(f)input_data})
-        
-        for line in "${lines[@]}"; do
-            if [[ "$line" =~ '^(.*)\|\|\|(.*)$' ]]; then
-                local raw_command="${match[1]}"
-                local description="${match[2]}"
-                
-                # Clean command: remove backticks
-                raw_command=$(echo "$raw_command" | sed -E 's/^[[:space:]]*`//g' | sed -E 's/`[[:space:]]*$//g')
-                raw_command=$(echo "$raw_command" | sed -E 's/^[[:space:]]+//;s/[[:space:]]+$//')
-                
-                # Ignore explanatory text
-                if [[ ! "$raw_command" =~ ^[Nn]ote: ]] && \
-                   [[ ! "$raw_command" =~ ^[Hh]ere\ (are|is) ]] && \
-                   [[ -n "$raw_command" ]]; then
-                    suggestions+=("$raw_command")
-                    descriptions+=("$description")
-                    risk_levels+=("SAFE")  # Default for legacy format
-                    categories+=("SYSTEM") # Default for legacy format
-                fi
-            fi
-        done
-        
-        if [[ ${#suggestions[@]} -gt 0 ]]; then
-            has_json_data=true  # Mark as successful parsing
-        fi
-    fi
-    
-    # Final fallback: Simple line-by-line parsing
-    if [[ "$has_json_data" != "true" ]]; then
-        if [[ -n "$ZSH_AI_COMMAND_DEBUG" ]]; then
-            echo "DEBUG: Using simple line-by-line parsing (legacy fallback)" >&2
-        fi
-        
-        suggestions=("${(@f)input_data}")  # Split by newlines
-        for cmd in "${suggestions[@]}"; do
-            descriptions+=("Command suggestion")
-            risk_levels+=("SAFE")
-            categories+=("SYSTEM")
-        done
+        return 1
     fi
     
     local selected_index=1
@@ -509,24 +494,16 @@ _ai_command_display_suggestions() {
     if [[ ${#suggestions[@]} -eq 1 ]]; then
         # Single command with enhanced display
         local command="${suggestions[1]}"
-        local description="${descriptions[1]}"
-        
-        # Use AI-provided data if available, otherwise analyze locally
-        local risk_level="${risk_levels[1]:-SAFE}"
+        local hint="${hints[1]}"
+        local warning_level="${warning_levels[1]:-SAFE}"
         local category_info="${categories[1]:-SYSTEM}"
-        if [[ "$risk_level" == "SAFE" && "$category_info" == "SYSTEM" && "$has_json_data" != "true" ]]; then
-            # Only do local analysis if we don't have AI-provided data
-            local analysis=$(_ai_command_analyze_command "$command")
-            risk_level="${analysis%%|*}"
-            category_info="${analysis#*|}"; category_info="${category_info%%|*}"
-        fi
         
-        local risk_color=$(_ai_command_get_risk_color "$risk_level")
+        local risk_color=$(_ai_command_get_risk_color "$warning_level")
         local category_display=$(_ai_command_get_category_display "$category_info")
         
-        # Generate warning based on risk level
+        # Generate warning based on warning level
         local warning=""
-        case "$risk_level" in
+        case "$warning_level" in
             "DANGEROUS") warning="WARNING: DANGEROUS - Can permanently delete files/data" ;;
             "CAUTION") warning="WARNING: Requires elevated privileges or affects system" ;;
         esac
@@ -537,9 +514,9 @@ _ai_command_display_suggestions() {
         echo "${fg[magenta]}├─[COMMAND DETAILS]─${reset_color}"
         echo "${fg[magenta]}│${reset_color}"
         echo "${fg[magenta]}│${reset_color} ${risk_color}>${reset_color} ${fg[bold]}Command:${reset_color} ${fg[cyan]}$command${reset_color}"
-        echo "${fg[magenta]}│${reset_color} ${fg[bold]}Purpose:${reset_color} $description"
+        echo "${fg[magenta]}│${reset_color} ${fg[bold]}Hint:${reset_color} $hint"
         echo "${fg[magenta]}│${reset_color} ${fg[bold]}Category:${reset_color} $category_display"
-        echo "${fg[magenta]}│${reset_color} ${risk_color}${fg[bold]}Risk Level:${reset_color} $risk_level${reset_color}"
+        echo "${fg[magenta]}│${reset_color} ${risk_color}${fg[bold]}Warning Level:${reset_color} $warning_level${reset_color}"
         if [[ -n "$warning" && "$warning" != "" ]]; then
             echo "${fg[magenta]}│${reset_color} ${fg[red]}${warning}${reset_color}"
         fi
@@ -581,28 +558,18 @@ _ai_command_display_suggestions() {
                 # Display commands with enhanced information
                 for i in {1..${#suggestions[@]}}; do
                     local command="${suggestions[$i]}"
-                    local description="${descriptions[$i]}"
-                    
-                    # Use AI-provided data if available, otherwise analyze locally
-                    local risk_level="${risk_levels[$i]:-SAFE}"
+                    local hint="${hints[$i]}"
+                    local warning_level="${warning_levels[$i]:-SAFE}"
                     local category_info="${categories[$i]:-SYSTEM}"
+                    
+                    # Generate warning based on warning level
                     local warning=""
+                    case "$warning_level" in
+                        "DANGEROUS") warning="WARNING: DANGEROUS - Can permanently delete files/data" ;;
+                        "CAUTION") warning="WARNING: Requires elevated privileges or affects system" ;;
+                    esac
                     
-                    if [[ "$risk_level" == "SAFE" && "$category_info" == "SYSTEM" && "$has_json_data" != "true" ]]; then
-                        # Only do local analysis if we don't have AI-provided data
-                        local analysis=$(_ai_command_analyze_command "$command")
-                        risk_level="${analysis%%|*}"
-                        category_info="${analysis#*|}"; category_info="${category_info%%|*}"
-                        warning="${analysis##*|}"
-                    else
-                        # Generate warning based on AI-provided risk level
-                        case "$risk_level" in
-                            "DANGEROUS") warning="WARNING: DANGEROUS - Can permanently delete files/data" ;;
-                            "CAUTION") warning="WARNING: Requires elevated privileges or affects system" ;;
-                        esac
-                    fi
-                    
-                    local risk_color=$(_ai_command_get_risk_color "$risk_level")
+                    local risk_color=$(_ai_command_get_risk_color "$warning_level")
                     local category_display=$(_ai_command_get_category_display "$category_info")
                     
                     if [[ $i -eq $selected_index ]]; then
@@ -610,9 +577,9 @@ _ai_command_display_suggestions() {
                         echo "${fg[yellow]}┌─[OPTION $i - SELECTED]─${reset_color}"
                         echo "${fg[yellow]}│${reset_color} ${risk_color}>${reset_color} ${fg[bold]}${fg[white]}$command${reset_color}"
                         if [[ "$show_details" == "true" ]]; then
-                            echo "${fg[yellow]}│${reset_color} ${fg[bold]}Purpose:${reset_color} $description"
+                            echo "${fg[yellow]}│${reset_color} ${fg[bold]}Hint:${reset_color} $hint"
                             echo "${fg[yellow]}│${reset_color} ${fg[bold]}Category:${reset_color} $category_display"
-                            echo "${fg[yellow]}│${reset_color} ${risk_color}${fg[bold]}Risk:${reset_color} $risk_level${reset_color}"
+                            echo "${fg[yellow]}│${reset_color} ${risk_color}${fg[bold]}Warning:${reset_color} $warning_level${reset_color}"
                             if [[ -n "$warning" && "$warning" != "" ]]; then
                                 echo "${fg[yellow]}│${reset_color} ${fg[red]}$warning${reset_color}"
                             fi
@@ -622,7 +589,7 @@ _ai_command_display_suggestions() {
                         # Regular option display
                         echo "${fg[cyan]}  $i)${reset_color} ${risk_color}>${reset_color} ${fg[cyan]}$command${reset_color}"
                         if [[ "$show_details" == "true" ]]; then
-                            echo "     Description: $description"
+                            echo "     Hint: $hint"
                         fi
                     fi
                     echo ""
@@ -701,34 +668,24 @@ _ai_command_display_suggestions() {
             # Display all commands with enhanced information
             for i in {1..${#suggestions[@]}}; do
                 local command="${suggestions[$i]}"
-                local description="${descriptions[$i]}"
-                
-                # Use AI-provided data if available, otherwise analyze locally
-                local risk_level="${risk_levels[$i]:-SAFE}"
+                local hint="${hints[$i]}"
+                local warning_level="${warning_levels[$i]:-SAFE}"
                 local category_info="${categories[$i]:-SYSTEM}"
+                
+                # Generate warning based on warning level
                 local warning=""
+                case "$warning_level" in
+                    "DANGEROUS") warning="WARNING: DANGEROUS - Can permanently delete files/data" ;;
+                    "CAUTION") warning="WARNING: Requires elevated privileges or affects system" ;;
+                esac
                 
-                if [[ "$risk_level" == "SAFE" && "$category_info" == "SYSTEM" && "$has_json_data" != "true" ]]; then
-                    # Only do local analysis if we don't have AI-provided data
-                    local analysis=$(_ai_command_analyze_command "$command")
-                    risk_level="${analysis%%|*}"
-                    category_info="${analysis#*|}"; category_info="${category_info%%|*}"
-                    warning="${analysis##*|}"
-                else
-                    # Generate warning based on AI-provided risk level
-                    case "$risk_level" in
-                        "DANGEROUS") warning="WARNING: DANGEROUS - Can permanently delete files/data" ;;
-                        "CAUTION") warning="WARNING: Requires elevated privileges or affects system" ;;
-                    esac
-                fi
-                
-                local risk_color=$(_ai_command_get_risk_color "$risk_level")
+                local risk_color=$(_ai_command_get_risk_color "$warning_level")
                 local category_display=$(_ai_command_get_category_display "$category_info")
                 
                 echo "${fg[cyan]}  $i)${reset_color} ${risk_color}>${reset_color} ${fg[cyan]}$command${reset_color}"
-                echo "     Purpose: $description"
+                echo "     Hint: $hint"
                 echo "     Category: $category_display"
-                echo "     Risk: $risk_level"
+                echo "     Warning Level: $warning_level"
                 if [[ -n "$warning" && "$warning" != "" ]]; then
                     echo "     ${fg[red]}$warning${reset_color}"
                 fi
@@ -742,7 +699,7 @@ _ai_command_display_suggestions() {
     fi
 }
 
-# Enhanced AI command function with smart mode detection
+# AI command function with structured JSON responses
 ai_command() {
     # Check dependencies
     if ! _ai_command_check_dependencies; then
@@ -755,79 +712,53 @@ ai_command() {
     fi
     
     local query="$*"
-    local enhanced_mode=false
     
-    # Check for special flags
+    # Check for help flag
     if [[ "$query" =~ ^(--help|-h) ]]; then
-        echo "${fg[green]}┌──────────────────────────────────────────────────┐${reset_color}"
+        echo "${fg[green]}┌───────────────────────────────────────────────┐${reset_color}"
         echo "${fg[green]}│ ${fg[bold]} _    ___    _____ ___  __  __ __  __    _   _  _ ____  ${reset_color}${fg[green]} │${reset_color}"
         echo "${fg[green]}│ ${fg[bold]}/_\  |_ _|  / ____/ _ \\|  \/  |  \/  |  /_\ | \| | |  _ \ ${reset_color}${fg[green]} │${reset_color}"
         echo "${fg[green]}│ ${fg[bold]}//_\\\ | |  | |  | | | | |\/| | |\/| | //_\\| .\` | | |_) |${reset_color}${fg[green]} │${reset_color}"
         echo "${fg[green]}│ ${fg[bold]}/_/ \\_\|_|  |_|  |_| |_|_|  |_|_|  |_|/_/ \\_\_|\\_|\_|____/ ${reset_color}${fg[green]} │${reset_color}"
         echo "${fg[green]}│                                                  │${reset_color}"
-        echo "${fg[green]}├─[USAGE]───────────────────────────────────────────┤${reset_color}"
+        echo "${fg[green]}├─[USAGE]─────────────────────────────────────────┤${reset_color}"
         echo "${fg[green]}│${reset_color} /AI <request>     - Get AI command suggestions    ${fg[green]}│${reset_color}"
-        echo "${fg[green]}│${reset_color} /AI --enhanced    - Get detailed options          ${fg[green]}│${reset_color}"
         echo "${fg[green]}│${reset_color} /AI --help        - Show this help                ${fg[green]}│${reset_color}"
-        echo "${fg[green]}├─[EXAMPLES]───────────────────────────────────────┤${reset_color}"
+        echo "${fg[green]}├─[EXAMPLES]──────────────────────────────────┤${reset_color}"
         echo "${fg[green]}│${reset_color} /AI stop docker service                          ${fg[green]}│${reset_color}"
-        echo "${fg[green]}│${reset_color} /AI --enhanced find large files                  ${fg[green]}│${reset_color}"
+        echo "${fg[green]}│${reset_color} /AI find large files                            ${fg[green]}│${reset_color}"
         echo "${fg[green]}│${reset_color} /AI check processes using port 3000             ${fg[green]}│${reset_color}"
-        echo "${fg[green]}├─[FEATURES]───────────────────────────────────────┤${reset_color}"
-        echo "${fg[green]}│${reset_color} > Risk assessment (SAFE/CAUTION/DANGEROUS)       ${fg[green]}│${reset_color}"
+        echo "${fg[green]}├─[FEATURES]──────────────────────────────────┤${reset_color}"
+        echo "${fg[green]}│${reset_color} > Warning level assessment (SAFE/CAUTION/DANGEROUS) ${fg[green]}│${reset_color}"
         echo "${fg[green]}│${reset_color} > Command categorization with labels             ${fg[green]}│${reset_color}"
-        echo "${fg[green]}│${reset_color} > Detailed explanations for each option          ${fg[green]}│${reset_color}"
+        echo "${fg[green]}│${reset_color} > Detailed hints for each command                ${fg[green]}│${reset_color}"
         echo "${fg[green]}│${reset_color} > Smart navigation (arrows + number keys)        ${fg[green]}│${reset_color}"
         echo "${fg[green]}│${reset_color} > Toggle detailed view with 'd' key              ${fg[green]}│${reset_color}"
-        echo "${fg[green]}└──────────────────────────────────────────────────┘${reset_color}"
+        echo "${fg[green]}└───────────────────────────────────────────────┘${reset_color}"
         return 0
     fi
     
-    # Check for enhanced mode flag
-    if [[ "$query" =~ ^--enhanced ]]; then
-        enhanced_mode=true
-        query="${query#--enhanced}"
-        query="${query#[[:space:]]*}"  # Remove leading whitespace
-    fi
-    
     if [[ -z "$query" ]]; then
-        echo "${fg[red]}┌─[ERROR: NO QUERY PROVIDED]─────────────────────────┐${reset_color}"
+        echo "${fg[red]}┌─[ERROR: NO QUERY PROVIDED]───────────────────────────┐${reset_color}"
         echo "${fg[red]}│${reset_color} ${fg[yellow]}Usage: /AI <your natural language request>${reset_color}         ${fg[red]}│${reset_color}"
         echo "${fg[red]}│${reset_color} ${fg[cyan]}Tip: Use /AI --help for more options${reset_color}               ${fg[red]}│${reset_color}"
-        echo "${fg[red]}├─[QUICK EXAMPLES]───────────────────────────────┤${reset_color}"
+        echo "${fg[red]}├─[QUICK EXAMPLES]──────────────────────────────┤${reset_color}"
         echo "${fg[red]}│${reset_color} > /AI stop docker service                         ${fg[red]}│${reset_color}"
         echo "${fg[red]}│${reset_color} > /AI find files larger than 100MB                ${fg[red]}│${reset_color}"
-        echo "${fg[red]}│${reset_color} > /AI --enhanced check system memory usage         ${fg[red]}│${reset_color}"
-        echo "${fg[red]}└──────────────────────────────────────────────────┘${reset_color}"
+        echo "${fg[red]}│${reset_color} > /AI check system memory usage                   ${fg[red]}│${reset_color}"
+        echo "${fg[red]}└───────────────────────────────────────────────┘${reset_color}"
         return 1
     fi
     
-    # Smart mode detection - use enhanced mode for complex queries
-    if [[ ! "$enhanced_mode" == "true" ]]; then
-        # Auto-enable enhanced mode for complex queries
-        if [[ "$query" =~ (multiple|different|options|ways|alternatives|complex|advanced|best|safest|fastest) ]] || \
-           [[ "$query" =~ (find.*and.*|check.*and.*|stop.*and.*|start.*and.*) ]] || \
-           [[ ${#query} -gt 50 ]]; then
-            enhanced_mode=true
-            echo "${fg[blue]}>>> COMPLEX QUERY DETECTED - ENHANCED MODE ACTIVATED <<<${reset_color}"
-        fi
-    fi
+    echo "${fg[blue]}>>> AI PROCESSING... <<<${reset_color}"
     
-    if [[ "$enhanced_mode" == "true" ]]; then
-        echo "${fg[blue]}>>> AI PROCESSING... (ENHANCED MODE) <<<${reset_color}"
-    else
-        echo "${fg[blue]}>>> AI PROCESSING... <<<${reset_color}"
-    fi
-    
-    local suggestions=$(_ai_command_call_api "$query" "$enhanced_mode")
+    local suggestions=$(_ai_command_call_api "$query")
     
     if [[ $? -eq 0 && -n "$suggestions" ]]; then
         _ai_command_display_suggestions "$suggestions"
     else
         echo "${fg[red]}Failed to get AI suggestions${reset_color}"
-        if [[ "$enhanced_mode" == "true" ]]; then
-            echo "${fg[yellow]}Tip: Try a simpler query without --enhanced flag${reset_color}"
-        fi
+        echo "${fg[yellow]}Tip: Check your API key and network connection${reset_color}"
         return 1
     fi
 }
